@@ -102,9 +102,9 @@ function M.new(config: Config): Instance
 				`Review the openspec change named {change} using the openspec-review skill`,
 				{
 					accepted = "The review does not contain any blocker findings",
-					probePrompt = "For the findings, do you know how to resolve them, or do you need human input?",
-					humanPredicate = "Human input is required to resolve the findings",
-					resolvePrompt = "Go ahead and resolve the findings",
+					probePrompt = "For the blocking findings, do you know how to resolve them, or do you need human input?",
+					humanPredicate = "Human input is required to resolve the blocking findings",
+					resolvePrompt = "Go ahead and resolve the blocking findings",
 				}
 			)
 			ptah.log(`openspec: change {change} is ready to implement`)
@@ -132,9 +132,9 @@ function M.new(config: Config): Instance
 				`Verify the implementation of the openspec change named {change} using the openspec-verify-change skill`,
 				{
 					accepted = "The verification does not contain critical findings or warnings",
-					probePrompt = "For the findings, do you know how to resolve them, or do you need human input?",
-					humanPredicate = "Human input is required to resolve the findings",
-					resolvePrompt = "Go ahead and resolve the findings",
+					probePrompt = "For the critical findings and warnings, do you know how to resolve them, or do you need human input?",
+					humanPredicate = "Human input is required to resolve the critical findings and warnings",
+					resolvePrompt = "Go ahead and resolve the critical findings and warnings",
 				}
 			)
 			-- The sync-and-archive step is part of the same operation: it
