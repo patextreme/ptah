@@ -50,7 +50,11 @@ Per-call data is a method argument:
   findings, escalating to a human or the cap otherwise.
 - `ops:implement(change)` — drive task execution
   (`openspec-apply-change`) until all tasks of the change are
-  implemented.
+  implemented. Each pass ends either complete or paused with a stated
+  reason, as the skill defines those states: a pause the agent can
+  resolve itself (e.g. updating the change's artifacts) is resolved and
+  the loop continues; a pause that needs human input fails the
+  operation.
 - `ops:verify(change)` — converge verification
   (`openspec-verify-change`) until it reports no critical findings or
   warnings, then sync and archive the change in the same operation.
