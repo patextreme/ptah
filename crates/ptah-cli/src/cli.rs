@@ -209,15 +209,17 @@ const CONFIG_SKELETON: &str = r#"# ptah agent registry (project layer).
 "#;
 
 /// Next-step hints printed by `ptah init` on every run — including
-/// runs where both files were skipped.
+/// runs where nothing changed.
 const INIT_HINTS: &str = r#"Next steps:
 
   1. Edit .ptah/config.toml — add an agent under [agents.<name>]; the
      comments there document every field and the two-layer discovery.
   2. Point your editor's luau-lsp at .ptah/ptah.d.luau (platform
      "standard") for script completion and type checking — see the
-     README "Editor setup" section. After upgrading ptah, refresh the
-     definitions with: ptah types > .ptah/ptah.d.luau
+     README "Editor setup" section. After upgrading ptah, re-run
+     ptah init to refresh the definitions; the alternative (scripting,
+     or refreshing without touching config) is:
+     ptah types > .ptah/ptah.d.luau
   3. Install CLI completions for your shell — ptah completions <shell>;
      per-shell install lines are in the README "Shell completions"
      section.
@@ -225,34 +227,101 @@ const INIT_HINTS: &str = r#"Next steps:
      whole API: skills/ptah/SKILL.md in the ptah repo.
 "#;
 
+/// Parse a ptah definitions version header — exactly the shape
+/// `definitions_bytes()` emits: `-- ptah <version> type definitions`
+/// with a non-empty version (design D3). Strict by construction: an
+/// exact prefix/suffix match with a non-empty middle; near-miss text,
+/// leading/trailing junk, and an empty version all read as
+/// unparseable. A malformed header never blocks an overwrite — it
+/// only costs the `updated:` line its version suffix.
+fn parse_defs_header(line: &str) -> Option<String> {
+    let version = line
+        .strip_prefix("-- ptah ")?
+        .strip_suffix(" type definitions")?;
+    if version.is_empty() {
+        return None;
+    }
+    Some(version.to_string())
+}
+
+/// Sync the project definitions (the `.ptah/ptah.d.luau` half of
+/// `ptah init`): a derived artifact of the installed binary, not
+/// user config. Created when absent; overwritten whenever its bytes
+/// differ from the current emit; left untouched only when it already
+/// matches one of the two accepted forms byte-for-byte (design D1) —
+/// the emitted output itself, or the emitted output minus its header
+/// line (design D2, so this repository's own headerless source
+/// definitions report current instead of being rewritten with a
+/// prepended header that would double at the next build). Overwrite
+/// is otherwise unconditional: provenance is not checked, only
+/// bytes. The write is a plain `fs::write` (design D5), matching the
+/// created path. Returns the one message line for the file; I/O
+/// failures propagate to the caller's exit-1 path.
+fn sync_definitions(path: &str) -> std::io::Result<String> {
+    let emitted = definitions_bytes();
+    let existing = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(path, &emitted)?;
+            return Ok(format!("created: {path}"));
+        }
+        Err(e) => return Err(e),
+    };
+    if existing == emitted.as_bytes()
+        || existing == crate::check::defs::TYPE_DEFINITIONS.as_bytes()
+    {
+        return Ok(format!("up to date: {path}"));
+    }
+    // Design D3: the version suffix comes from the overwritten file's
+    // first line when it parses as a ptah header — a stale emit gets
+    // `updated: (old -> new)`, a hand-edited or foreign file a bare
+    // `updated:`. An unparseable first line (or invalid UTF-8) never
+    // blocks the overwrite, only the suffix.
+    let old = existing
+        .split(|&b| b == b'\n')
+        .next()
+        .and_then(|line| std::str::from_utf8(line).ok())
+        .and_then(parse_defs_header);
+    let current = crate::VERSION;
+    std::fs::write(path, &emitted)?;
+    Ok(match old {
+        Some(old) => format!("updated: {path} ({old} -> {current})"),
+        None => format!("updated: {path}"),
+    })
+}
+
 /// `ptah init`: scaffold `./.ptah/` in the current working directory
 /// with exactly two files — `ptah.d.luau` (byte-identical to
 /// `ptah types` stdout) and `config.toml` (commented registry
-/// skeleton). Each file is written only when absent; existing files
-/// are skipped with a message, never clobbered, so re-running is
-/// idempotent and a partial scaffold completes. Hints print on every
-/// run. Requires no script, registry, or agent configuration; a
-/// failure to create the directory or write a file reports on stderr
-/// and exits 1.
+/// skeleton). The two have different ownership: the config is
+/// user-authored — created when absent, skipped with a message
+/// otherwise, never modified — while the definitions are a derived
+/// artifact this binary syncs via `sync_definitions` (created /
+/// updated / confirmed current), so re-running after an upgrade is
+/// the refresh path and a partial scaffold still completes. Hints
+/// print on every run. Requires no script, registry, or agent
+/// configuration; a failure to create the directory or write a file
+/// reports on stderr and exits 1.
 fn run_init() -> ExitCode {
     if let Err(e) = std::fs::create_dir_all("./.ptah") {
         eprintln!("error: cannot create ./.ptah: {e}");
         return ExitCode::from(1);
     }
-    for (name, contents) in [
-        ("config.toml", CONFIG_SKELETON),
-        ("ptah.d.luau", definitions_bytes().as_str()),
-    ] {
-        let path = format!(".ptah/{name}");
-        if std::path::Path::new(&path).exists() {
-            println!("skipped (exists): {path}");
-            continue;
-        }
-        if let Err(e) = std::fs::write(&path, contents) {
-            eprintln!("error: cannot write {path}: {e}");
+    // The config keeps its create-or-skip semantics, unchanged.
+    if std::path::Path::new(".ptah/config.toml").exists() {
+        println!("skipped (exists): .ptah/config.toml");
+    } else if let Err(e) = std::fs::write(".ptah/config.toml", CONFIG_SKELETON) {
+        eprintln!("error: cannot write .ptah/config.toml: {e}");
+        return ExitCode::from(1);
+    } else {
+        println!("created: .ptah/config.toml");
+    }
+    match sync_definitions(".ptah/ptah.d.luau") {
+        Ok(line) => println!("{line}"),
+        Err(e) => {
+            eprintln!("error: cannot write .ptah/ptah.d.luau: {e}");
             return ExitCode::from(1);
         }
-        println!("created: {path}");
     }
     print!("{INIT_HINTS}");
     ExitCode::SUCCESS
@@ -589,6 +658,117 @@ mod tests {
             body,
             crate::check::defs::TYPE_DEFINITIONS,
             "definitions body must be the embedded file byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn parse_defs_header_accepts_the_emitted_shape() {
+        assert_eq!(
+            parse_defs_header("-- ptah 0.0.1 type definitions"),
+            Some("0.0.1".to_string())
+        );
+        assert_eq!(
+            parse_defs_header(&format!(
+                "-- ptah {} type definitions",
+                crate::VERSION
+            )),
+            Some(crate::VERSION.to_string())
+        );
+    }
+
+    #[test]
+    fn parse_defs_header_rejects_empty_version_and_near_misses() {
+        // Empty version: the double space collapses both delimiters.
+        assert_eq!(parse_defs_header("-- ptah  type definitions"), None);
+        // Near-miss text: none of these is the exact emitted shape.
+        for line in [
+            "-- ptah 0.1.0 type definition",    // missing plural
+            "-- ptah 0.1.0 definitions",        // missing middle words
+            "-- ptahx 0.1.0 type definitions",  // prefix not exact
+            "--  ptah 0.1.0 type definitions",  // double space after --
+            "  -- ptah 0.1.0 type definitions", // leading whitespace
+            "-- ptah 0.1.0 type definitions ",  // trailing whitespace
+            "--ptah 0.1.0 type definitions",    // missing space
+            "",                                 // nothing at all
+        ] {
+            assert_eq!(parse_defs_header(line), None, "must reject {line:?}");
+        }
+    }
+
+    #[test]
+    fn sync_definitions_creates_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ptah.d.luau");
+        let line = sync_definitions(path.to_str().unwrap()).unwrap();
+        assert_eq!(line, format!("created: {}", path.display()));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            definitions_bytes().as_bytes(),
+            "created file must be the current emit byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn sync_definitions_reports_up_to_date_for_both_accepted_forms() {
+        // Design D1/D2: both the emitted form and the headerless body
+        // verbatim (this repo's source layout) are current — no write.
+        for existing in [
+            definitions_bytes(),
+            crate::check::defs::TYPE_DEFINITIONS.to_string(),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ptah.d.luau");
+            std::fs::write(&path, &existing).unwrap();
+            let line = sync_definitions(path.to_str().unwrap()).unwrap();
+            assert_eq!(
+                line,
+                format!("up to date: {}", path.display()),
+                "for existing {existing:?}"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                existing.as_bytes(),
+                "no-write outcome must leave the file untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_definitions_updates_stale_file_with_version_arrow() {
+        // A fabricated older emit: ptah header naming an old version
+        // plus a body that differs from the current one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ptah.d.luau");
+        std::fs::write(&path, "-- ptah 0.0.1 type definitions\n-- stale body\n").unwrap();
+        let line = sync_definitions(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            line,
+            format!(
+                "updated: {} (0.0.1 -> {})",
+                path.display(),
+                crate::VERSION
+            )
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            definitions_bytes().as_bytes(),
+            "stale file must be overwritten with the current emit"
+        );
+    }
+
+    #[test]
+    fn sync_definitions_overwrites_headerless_difference_without_suffix() {
+        // Hand-edited or foreign content: differs, first line is not a
+        // ptah header — overwritten all the same, updated: line bare.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ptah.d.luau");
+        std::fs::write(&path, "--!strict\n-- hand-edited or foreign content\n").unwrap();
+        let line = sync_definitions(path.to_str().unwrap()).unwrap();
+        assert_eq!(line, format!("updated: {}", path.display()));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            definitions_bytes().as_bytes(),
+            "differing file must be overwritten with the current emit"
         );
     }
 

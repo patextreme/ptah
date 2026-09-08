@@ -68,7 +68,8 @@ ptah --version
   errors
 - `ptah init` — scaffold `./.ptah/` with the type definitions and a
   commented registry skeleton (see [Editor setup](#editor-setup));
-  skips files that already exist
+  the config skeleton is created once and left alone, the definitions
+  are synced to the installed binary
 
 Exit codes: `0` on success, `1` on an uncaught script error or a never-observed
 task error (printed to stderr), `2` on CLI/usage errors, `n` when the script
@@ -561,9 +562,15 @@ directory with exactly two files —
   (see the comments there for the two-layer discovery and `${VAR}`
   interpolation rules).
 
-Existing files are skipped, never overwritten — re-running `ptah init`
-is safe. After upgrading ptah, refresh the definitions without
-re-running init:
+The two files have different ownership. `.ptah/config.toml` is
+user-authored: created once, reported as skipped on every later run,
+never modified. `.ptah/ptah.d.luau` is a derived artifact of the
+installed binary: init syncs it — created when absent, overwritten
+whenever its bytes differ from the current binary's output, reported
+`up to date` when it already matches. So re-running `ptah init` after
+upgrading ptah is the primary way to refresh the definitions. The
+documented alternative — for scripting, or refreshing without touching
+config — is:
 
 ```sh
 ptah types > .ptah/ptah.d.luau
