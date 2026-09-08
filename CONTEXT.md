@@ -37,6 +37,12 @@ The data-only configuration table a consumer repo passes into a Component or
 stdlib call. Functions are not configuration.
 _Avoid_: settings, options file
 
+**Reviewer instruction**:
+The text that tells the work agent how to review — a configured instruction
+in Local config, or the component's built-in default. A long or repo-pinned
+one points at a versioned document rather than inlining text.
+_Avoid_: instruction document, review instruction, prompt
+
 **Mount point**:
 The location in a consumer repo where the Factory Components tree is made
 available (symlink, submodule, vendored copy). Library code only requires
