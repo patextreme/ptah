@@ -9,8 +9,8 @@
 local piAgent = ptah.agent("pi")
 
 -- COMPONENTS
-local openspec = require("../../factory-components/components/openspec/component")
-local prReview = require("../../factory-components/components/pr-review-loop/component")
+local openspec = require("../../../factory-components/components/openspec/component")
+local prReview = require("../../../factory-components/components/pr-review-loop/component")
 local opsx = openspec.new({
 	agent = piAgent,
 	judgeAgent = piAgent,
@@ -27,7 +27,7 @@ local prr = prReview.new({
 })
 
 -- WORKFLOW
-local changeName = "pr-review-instruction-contract"
+local changeName = "pr-review-direct-instruction"
 
 opsx:groom(changeName)
 opsx:implement(changeName)
@@ -35,8 +35,8 @@ opsx:verify(changeName)
 
 local session = piAgent:session({
 	id = "committer",
-	resultSchema = { prUrl = { type = "string" } }
+	resultSchema = { prUrl = { type = "string" } },
 })
-session:prompt("Commit the uncommitted changes and push to remote")
+session:prompt("Commit the uncommitted changes (except the .ptah directory) and push to remote")
 local result = session:prompt("What is the PR url? Pass the url back to the ptah via result submit tool")
-prr:review(result.result.prUrl :: string )
+prr:review(result.result.prUrl :: string)

@@ -36,8 +36,7 @@ local DEFAULT_MAX_ITERATIONS = 10
 local M = {}
 
 function M.new(config: Config): Instance
-	local maxIterations =
-		if config.maxIterations ~= nil then config.maxIterations else DEFAULT_MAX_ITERATIONS
+	local maxIterations = if config.maxIterations ~= nil then config.maxIterations else DEFAULT_MAX_ITERATIONS
 	local work: Agent = config.agent
 
 	-- Prompt, judge the output, escalate or fix, repeat — bounded.
@@ -63,11 +62,13 @@ function M.new(config: Config): Instance
 			end
 
 			local outcome = session:prompt(header .. prompt)
-			if predicate(opts.accepted, outcome.text, {
-				agent = config.judgeAgent,
-				model = config.judgeModel,
-				sessionId = `{sessionId}-judge:{iteration}`,
-			}) then
+			if
+				predicate(opts.accepted, outcome.text, {
+					agent = config.judgeAgent,
+					model = config.judgeModel,
+					sessionId = `{sessionId}-judge:{iteration}`,
+				})
+			then
 				session:close()
 				return outcome.text
 			end
@@ -83,9 +84,7 @@ function M.new(config: Config): Instance
 			if needsHuman then
 				session:close()
 				local excerpt = string.gsub(string.sub(probe.text, 1, 200), "[\r\n]", " ")
-				error(
-					`{sessionId}: human input is required (iteration {iteration + 1} of {maxIterations}): {excerpt}`
-				)
+				error(`{sessionId}: human input is required (iteration {iteration + 1} of {maxIterations}): {excerpt}`)
 			end
 
 			session:prompt(header .. opts.resolvePrompt)
@@ -97,16 +96,13 @@ function M.new(config: Config): Instance
 	local instance: Instance = {
 		groom = function(_self: Instance, change: string): string
 			ptah.log(`openspec: reviewing change {change}`)
-			local text = drive(
-				"openspec-groom",
-				`Review the openspec change named {change} using the openspec-review skill`,
-				{
+			local text =
+				drive("openspec-groom", `Review the openspec change named {change} using the openspec-review skill`, {
 					accepted = "The review does not contain any blocker findings",
 					probePrompt = "For the blocking findings, do you know how to resolve them, or do you need human input?",
 					humanPredicate = "Human input is required to resolve the blocking findings",
 					resolvePrompt = "Go ahead and resolve the blocking findings",
-				}
-			)
+				})
 			ptah.log(`openspec: change {change} is ready to implement`)
 			return text
 		end,

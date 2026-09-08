@@ -682,7 +682,7 @@ fn dogfood_openspec_shim_runs() {
     let rules = r#"[{"match":"PR url","value":{"prUrl":"https://github.com/patextreme/ptah/pull/10"}},{"match":"","value":true}]"#
         .to_string();
     let p = Project::new_env("dogfood-openspec", "pi", &[("MOCK_SUBMIT_MATCH", &rules)]);
-    let (code, stdout, stderr) = p.run(&workflow("openspec.luau"), &["--no-color"]);
+    let (code, stdout, stderr) = p.run(&workflow("openspec/main.luau"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("Please sync and archive the change"),
@@ -697,7 +697,7 @@ fn dogfood_pr_review_loop_shim_runs() {
         "pi",
         &[("MOCK_SUBMIT_MATCH", &converges_on_second_pass())],
     );
-    let (code, stdout, stderr) = p.run(&workflow("pr-review-loop.luau"), &["--no-color"]);
+    let (code, stdout, stderr) = p.run(&workflow("pr-review-loop/main.luau"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("push them to the PR branch"),

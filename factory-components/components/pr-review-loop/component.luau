@@ -48,8 +48,7 @@ local DEFAULT_MAX_ITERATIONS = 15
 local M = {}
 
 function M.new(config: Config): Instance
-	local maxIterations =
-		if config.maxIterations ~= nil then config.maxIterations else DEFAULT_MAX_ITERATIONS
+	local maxIterations = if config.maxIterations ~= nil then config.maxIterations else DEFAULT_MAX_ITERATIONS
 	local dryRun = config.dryRun == true
 	local work: Agent = config.agent
 
@@ -76,16 +75,20 @@ function M.new(config: Config): Instance
 				-- document by design).
 				local reviewAsk: string
 				if config.reviewInstructionFile ~= nil then
-					reviewAsk = `Use the review instruction at {config.reviewInstructionFile} to review PR {prUrl}. Based on the review feedback, determine the blocking issues and the non-blocking issues.`
+					reviewAsk =
+						`Use the review instruction at {config.reviewInstructionFile} to review PR {prUrl}. Based on the review feedback, determine the blocking issues and the non-blocking issues.`
 				else
-					reviewAsk = `Use the following review instruction:\n\n{defaultInstruction}\n\n---\n\nUsing this instruction, review PR {prUrl}. Based on the review feedback, determine the blocking issues and the non-blocking issues.`
+					reviewAsk =
+						`Use the following review instruction:\n\n{defaultInstruction}\n\n---\n\nUsing this instruction, review PR {prUrl}. Based on the review feedback, determine the blocking issues and the non-blocking issues.`
 				end
 				local outcome = session:prompt(header .. reviewAsk)
-				if predicate("The review verdict does not contain blocking issues", outcome.text, {
-					agent = config.judgeAgent,
-					model = config.judgeModel,
-					sessionId = `pr-review-judge:{iteration}`,
-				}) then
+				if
+					predicate("The review verdict does not contain blocking issues", outcome.text, {
+						agent = config.judgeAgent,
+						model = config.judgeModel,
+						sessionId = `pr-review-judge:{iteration}`,
+					})
+				then
 					-- The converged session posts the verdict comment.
 					session:prompt(header .. "Please comment on the PR with the review feedback along with the verdict")
 					session:close()
@@ -99,15 +102,11 @@ function M.new(config: Config): Instance
 					header
 						.. "For each of the blocking issues, validate with a subagent whether the issue is real. For the blocking issues that remain, do you know how to resolve them, or do you need human input?"
 				)
-				local needsHuman = predicate(
-					"Human input is required to resolve the blocking issues",
-					probe.text,
-					{
-						agent = config.judgeAgent,
-						model = config.judgeModel,
-						sessionId = `pr-review-human:{iteration}`,
-					}
-				)
+				local needsHuman = predicate("Human input is required to resolve the blocking issues", probe.text, {
+					agent = config.judgeAgent,
+					model = config.judgeModel,
+					sessionId = `pr-review-human:{iteration}`,
+				})
 				if needsHuman then
 					session:close()
 					error(

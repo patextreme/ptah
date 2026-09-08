@@ -94,8 +94,8 @@
           --definitions=.ptah/ptah.d.luau \
           examples/*.luau examples/*/*.luau crates/ptah-cli/tests/fixtures/*.luau \
           factory-components/std/*.luau \
-          factory-components/components/*/component.luau \
-          .ptah/workflows/*.luau
+          factory-components/components/*/*.luau \
+          .ptah/workflows/*/*.luau
         runHook postCheck
       '';
 

@@ -183,7 +183,7 @@ assert(ex.stdout == '[{"n":1}]', "exec stdout: " .. ex.stdout)
 local items = ptah.json.parse(ex.stdout)
 assert(items[1].n == 1, "json parse: " .. tostring(items[1].n))
 local encoded = ptah.json.stringify(items, { indent = 2 })
-assert(encoded == "[\n  {\n    \"n\": 1\n  }\n]", "json stringify: " .. encoded)
+assert(encoded == '[\n  {\n    "n": 1\n  }\n]', "json stringify: " .. encoded)
 local nonzero = ptah.exec("sh -c 'exit 4'")
 assert(nonzero.exitCode == 4, "nonzero exit is data: " .. tostring(nonzero.exitCode))
 

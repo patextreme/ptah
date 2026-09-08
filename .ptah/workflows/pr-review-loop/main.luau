@@ -3,7 +3,7 @@
 -- factory-components/README.md for the consumption model). The only
 -- workflow code this repo owns.
 
-local prReview = require("../../factory-components/components/pr-review-loop/component")
+local prReview = require("../../../factory-components/components/pr-review-loop/component")
 
 local agent = ptah.agent("pi")
 

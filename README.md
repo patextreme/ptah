@@ -647,9 +647,9 @@ library: repo-agnostic stdlib helpers (`std/`) — the typed boolean
 judge (`predicate`), the GitHub CLI transport (`gh`), and the repo-loop
 skeleton (`daemon`) — plus
 composable workflow components (`components/`) such as the openspec
-lifecycle and a PR review loop. This repo's own
-`.ptah/workflows/*.luau` are shims over it (dogfooding is what keeps
-the copies from drifting).
+lifecycle and a PR review loop. The scripts under
+`.ptah/workflows/` are shims over it (dogfooding is what keeps the copies
+from drifting).
 
 The library is consumed as **source**: mount the tree wherever you
 like (nix flake input + symlink, git submodule, vendored copy) and
