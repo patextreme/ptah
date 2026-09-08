@@ -187,6 +187,12 @@ assert(encoded == '[\n  {\n    "n": 1\n  }\n]', "json stringify: " .. encoded)
 local nonzero = ptah.exec("sh -c 'exit 4'")
 assert(nonzero.exitCode == 4, "nonzero exit is data: " .. tostring(nonzero.exitCode))
 
+-- os.getenv (environment reads): the startup snapshot — set, unset,
+-- and set-to-empty are distinguishable (PTAH_ENV_* set by tests/types.rs).
+assert(os.getenv("PTAH_ENV_PROBE") == "x", "env probe: " .. tostring(os.getenv("PTAH_ENV_PROBE")))
+assert(os.getenv("PTAH_ENV_ABSENT") == nil, "env absent must be nil")
+assert(os.getenv("PTAH_ENV_EMPTY") == "", "env empty must be the empty string")
+
 -- ptah.log, ptah.version.
 assert(type(ptah.version) == "string" and #ptah.version > 0, "version")
 ptah.log("probe complete: " .. ptah.version)

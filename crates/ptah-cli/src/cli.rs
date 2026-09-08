@@ -453,6 +453,12 @@ pub fn main() -> ExitCode {
         )),
         shutdown: Some(shutdown_rx),
         renderer,
+        // The env snapshot behind `os.getenv`: captured once here via
+        // `vars_os` + UTF-8 filter — `env::vars()` panics on non-UTF-8
+        // entries, while those entries merely read as unset (design D5).
+        env: std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+            .collect(),
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()

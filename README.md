@@ -356,13 +356,19 @@ results. Never an error, never a hang. Scripts that must have a value
 write a nil-check retry loop, as above.
 
 Scripts run in a sandboxed Luau environment: `string`, `table`, `math`,
-`utf8`, `bit32`, `buffer`, `os.time`, `os.clock`, and `print` — no file I/O,
-network, or debug facilities. `require` resolves `.luau` modules relative to
+`utf8`, `bit32`, `buffer`, `os.time`, `os.clock`, `os.getenv`, and `print` —
+no file I/O, network, or debug facilities. `require` resolves `.luau` modules relative to
 the requiring file with no directory boundary (`require("../shared/helper")`
 reaches sibling trees); non-relative require strings (absolute paths, bare
 module names, aliases) are rejected. Scripts are trusted code — they drive
 agents with your full authority, and the sandbox limits the blast radius of
-bugs, not malice. (One deviation: a restricted `coroutine` table containing
+bugs, not malice. `os.getenv` fits that posture: it is the single
+environment-read surface, observing a snapshot of ptah's environment taken
+once when the run starts — read-only, not enumerable, and not mutable from
+the script (`os.setenv` does not exist; variables whose values are not
+valid UTF-8 read as unset). Environment values — secrets included — are
+therefore script-readable, exactly like the shell profile that set them.
+(One deviation: a restricted `coroutine` table containing
 only `yield` remains visible because the embedded async runtime needs it;
 the scheduling primitives are absent.)
 
@@ -581,7 +587,7 @@ violations flagged before a run — by pointing
 [luau-lsp](https://github.com/luau-lsp/luau-lsp) at `.ptah/ptah.d.luau`.
 Start scripts with `--!strict` for full checking (the
 [bundled examples](examples/) do). The definitions also model the sandbox —
-`os` trimmed to `time`/`clock`, `coroutine` to `yield`, and
+`os` trimmed to `time`/`clock`/`getenv`, `coroutine` to `yield`, and
 `loadstring`/`collectgarbage` unavailable — so editor-approved code cannot
 reach a global the runtime poisons. Definitions apply workspace-wide, so
 keep them out of mixed Luau projects you don't run under ptah.

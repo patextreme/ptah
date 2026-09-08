@@ -1,6 +1,7 @@
 //! End-to-end Luau runtime tests: scripts drive the in-repo mock agent
 //! through the full `ptah` namespace.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,6 +53,7 @@ fn run_with_registry(
         process_runner: Some(Arc::new(TokioProcessRunner::new())),
         shutdown: None,
         renderer: Arc::new(Renderer::new(RenderOptions::quiet())),
+        env: BTreeMap::new(),
     };
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -758,4 +760,44 @@ ptah.exit(0)
     let out = run(&script, &dir);
     assert_eq!(out.code, 0, "error: {:?}", out.error);
     common::wait_for_processes("9874", 0, "in-flight exec killed by ptah.exit teardown");
+}
+
+#[test]
+fn non_utf8_environment_entries_read_as_unset() {
+    // The composition root captures the env snapshot via `vars_os` +
+    // UTF-8 filter: a non-UTF-8 entry must not crash the run at
+    // startup (`env::vars()` panics on it — design D5) and must read
+    // as `nil` through `os.getenv`. Exercises the real binary so the
+    // cli.rs capture is what's under test.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let dir = tmpdir("env-nonutf8");
+        let script = write_script(
+            &dir,
+            r#"
+assert(os.getenv("PTAH_ENV_PROBE") == "x", "set variable must read through")
+assert(os.getenv("PTAH_ENV_BAD") == nil, "non-UTF-8 entry must read as unset")
+ptah.exit(0)
+"#,
+        );
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ptah"))
+            .arg("run")
+            .arg(&script)
+            .current_dir(&dir)
+            .env("PTAH_ENV_PROBE", "x")
+            .env(
+                "PTAH_ENV_BAD",
+                std::ffi::OsString::from_vec(vec![0xff, 0xfe, 0xfd]),
+            )
+            .output()
+            .expect("run ptah");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "run with a non-UTF-8 env entry must succeed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
 }

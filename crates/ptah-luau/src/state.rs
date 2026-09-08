@@ -1,6 +1,7 @@
 //! Per-run runtime state, plus the run's configuration and result types.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -49,6 +50,10 @@ pub(crate) struct RuntimeState {
     /// In-flight `ptah.exec` calls, registered at start and removed at
     /// end; teardown drains this to kill live process groups.
     pub(crate) execs: RefCell<Vec<Rc<ExecEntry>>>,
+    /// Snapshot of ptah's environment for `os.getenv`: captured once at
+    /// the composition root and injected — the binding performs no
+    /// ambient environment read.
+    pub(crate) env: BTreeMap<String, String>,
     pub(crate) exit_code: Cell<Option<i32>>,
 }
 
@@ -79,6 +84,12 @@ pub struct RunConfig {
     /// The output sink: `Arc<Renderer>` coerces here at construction
     /// sites, so callers keep building the terminal renderer.
     pub renderer: Arc<dyn EventSink>,
+    /// Snapshot of ptah's environment for `os.getenv`, captured once at
+    /// the composition root (`env::vars_os()` filtered to valid UTF-8,
+    /// so non-UTF-8 entries read as unset — `env::vars()` panics on
+    /// them). Injection, not an ambient read: the scripting runtime
+    /// never touches `std::env`. Tests default to an empty snapshot.
+    pub env: BTreeMap<String, String>,
 }
 
 /// Result of one run.

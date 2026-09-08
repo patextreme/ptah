@@ -21,7 +21,7 @@ blast radius of bugs, not malice.
   no `ptah.env`; `os.getenv` is the single environment-read surface.
 - Reads observe a snapshot of ptah's environment captured once at the
   composition root and injected into the runtime like every other
-  capability. ptah-luau performs no ambient environment reads in bindings;
+  capability. the `os.getenv` binding performs no ambient environment read;
   scripts cannot enumerate the environment or mutate it (no `setenv`, no
   env options on `ptah.exec`, no change to `${VAR}` interpolation).
 - The embedded type definitions mirror the new member; the README sandbox
@@ -49,7 +49,9 @@ blast radius of bugs, not malice.
 
 - `crates/ptah-luau`: `sandbox.rs` binds `getenv` next to `time`/`clock`;
   `state.rs` carries the snapshot in `RunConfig`/`RuntimeState`.
-- `crates/ptah-cli`: `cli.rs` captures `env::vars()` at composition.
+- `crates/ptah-cli`: `cli.rs` captures the environment at composition
+  via `env::vars_os()` filtered to valid UTF-8 — `env::vars()` panics on
+  non-UTF-8 entries — so non-UTF-8 variables read as unset.
 - `.ptah/ptah.d.luau`: `declare os` gains
   `getenv: (name: string) -> string?`; the runtime probe test (spec-pinned
   by type-definitions "Definitions stay synchronized") exercises it.

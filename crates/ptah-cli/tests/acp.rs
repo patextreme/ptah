@@ -545,6 +545,7 @@ fn run_script(name: &str, body: &str) -> ptah::script::RunOutcome {
         process_runner: None, // exec is not under test here
         shutdown: None,
         renderer: Arc::new(Renderer::new(RenderOptions::quiet())),
+        env: std::collections::BTreeMap::new(),
     };
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

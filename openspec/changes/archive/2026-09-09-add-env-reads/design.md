@@ -52,10 +52,12 @@ enumeration), and the stdlib shape invites `os.date`-style asks later
 
 ### D2: Injected snapshot, not an ambient read in the binding
 
-`cli.rs` captures `std::env::vars().collect()` into a
-`BTreeMap<String, String>` on `RunConfig`; `sandbox.rs` binds an
-`os.getenv` closure over the snapshot right where `time`/`clock` are set.
-No `std::env` call anywhere in the script-facing binding path.
+`cli.rs` captures the environment into a `BTreeMap<String, String>` on
+`RunConfig` via the D5 capture (`env::vars_os()` filtered to valid
+UTF-8); `sandbox.rs` binds an `os.getenv` closure over the snapshot
+right where `time`/`clock` are set.
+No new `std::env` call in the script-facing binding path (`interp_lookup`
+remains the sole carve-out, per D3).
 Alternatives: calling `std::env::var` directly in the binding (smallest
 diff, and `interp_lookup` already crosses that line — rejected because a
 script-facing API is a more visible commitment than an internal
@@ -86,10 +88,13 @@ against that threat model.
 
 ### D5: Non-UTF-8 values read as unset
 
-`std::env::vars()` skips non-UTF-8 entries, so they read as `nil`. The
-lossless alternative (`env::vars_os` into Luau byte strings) was rejected:
-every downstream consumer (prompts, `ptah.json`, agent argv) wants UTF-8,
-and "reads as unset" is a predictable failure mode.
+`std::env::vars()` panics when any entry is not valid UTF-8 (`Vars::next`
+unwraps the conversion — verified on the pinned nightly), so the capture
+iterates `env::vars_os()` and skips entries whose key or value fails
+`into_string()`; skipped entries read as `nil`. The lossless alternative
+(exposing `vars_os` values as Luau byte strings) was rejected: every
+downstream consumer (prompts, `ptah.json`, agent argv) wants UTF-8, and
+"reads as unset" is a predictable failure mode.
 
 ## Risks / Trade-offs
 

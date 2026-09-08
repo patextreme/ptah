@@ -21,6 +21,7 @@ fn test_lua(script_dir: &std::path::Path) -> Lua {
         process_runner: None,
         shutdown: None,
         renderer: Arc::new(Renderer::new(RenderOptions::quiet())),
+        env: std::collections::BTreeMap::new(),
     };
     script::setup_lua(&cfg).unwrap()
 }
@@ -63,11 +64,12 @@ fn sandboxed_globals_absent() {
         assert!(!err.to_string().is_empty());
     }
 
-    // os restricted to time/clock
+    // os restricted to time/clock/getenv
     let os: mlua::Table = globals.get("os").unwrap();
     assert!(os.get::<Function>("time").is_ok());
     assert!(os.get::<Function>("clock").is_ok());
-    for name in ["execute", "getenv", "remove", "rename", "exit", "date"] {
+    assert!(os.get::<Function>("getenv").is_ok());
+    for name in ["execute", "setenv", "remove", "rename", "exit", "date"] {
         let v: Value = os.get(name).unwrap();
         assert!(matches!(v, Value::Nil), "os.{name} must be absent");
     }

@@ -44,7 +44,7 @@ The definitions SHALL additionally type `exec`: `ptah.exec(cmd: string, opts?: {
 - **THEN** both calls are accepted, and a call to an invented member (e.g. `ptah.json.load`) reports a type error
 
 ### Requirement: Definitions model the sandbox
-The definitions SHALL shadow the trimmed globals the runtime provides: `os` restricted to `time` and `clock`, `coroutine` restricted to `yield`, and `loadstring` and `collectgarbage` declared as nil.
+The definitions SHALL shadow the trimmed globals the runtime provides: `os` restricted to `time`, `clock`, and `getenv` (typed `getenv: (name: string) -> string?`, returning `nil` for unset variables), `coroutine` restricted to `yield`, and `loadstring` and `collectgarbage` declared as nil.
 
 #### Scenario: Removed global flagged
 - **WHEN** a script analyzed with the definitions calls `os.date`, `coroutine.create`, or `loadstring`
