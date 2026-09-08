@@ -48,3 +48,9 @@ The location in a consumer repo where the Factory Components tree is made
 available (symlink, submodule, vendored copy). Library code only requires
 within its own tree, so the mount point is the consumer's free choice.
 _Avoid_: vendor dir (that is one mounting mechanism, not the concept)
+
+**ptah's environment**:
+The environment variables ptah inherits from its parent process, captured
+once at startup. The read-only source behind `${VAR}` interpolation, agent
+and shell-step inheritance, and script reads.
+_Avoid_: the env, process env, environment config (that names the agent registry)
