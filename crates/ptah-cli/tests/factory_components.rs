@@ -538,7 +538,7 @@ ops:groom("demo-change")
 
 #[test]
 fn pr_review_loop_converges_review_fix_push() {
-    // Default mode (no `reviewInstructionFile` — this repo's own
+    // Default mode (no `reviewInstruction` — this repo's own
     // dogfood configuration): the loop runs against the built-in
     // default instruction. Judge rules: the second review pass passes
     // (the fix landed), the escalation predicate never needs a human,
@@ -616,19 +616,16 @@ print("review-ok:" .. tostring(text ~= nil))
 
 #[test]
 fn pr_review_loop_configured_instruction_wins_over_default() {
-    // File-mode precedence: a test-authored instruction document is
-    // configured via `reviewInstructionFile`; its path must reach the
-    // agent (file mode references the document, it does not inline
-    // it), while the built-in default's classification directive
-    // (uppercase BLOCKING) must not — a configured document wins over
-    // the default.
+    // Replace semantics: test-authored instruction text is
+    // configured via `reviewInstruction`; the text must be inlined
+    // into the echoed review prompt, while the built-in default's
+    // classification directive (uppercase BLOCKING) must not appear —
+    // a configured instruction fully replaces the default (the
+    // test's own text deliberately avoids the uppercase directive,
+    // so only the inlined default could match it).
     let p = Project::new(
-        "pr-review-file-wins",
+        "pr-review-instruction-wins",
         &[("MOCK_SUBMIT_MATCH", &converges_on_second_pass())],
-    );
-    p.write(
-        ".ptah/instructions/reviewer.md",
-        "# Reviewer instruction\n\nThis repository's own classification policy.\n",
     );
     let script = p.write(
         "main.luau",
@@ -637,7 +634,7 @@ local prReview = require("./vendor/factory-components/components/pr-review-loop/
 local loop = prReview.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
-	reviewInstructionFile = ".ptah/instructions/reviewer.md",
+	reviewInstruction = "Review for correctness first. Judge each finding against this repository's severity ladder and label it blocking or non-blocking.",
 })
 local text = loop:review("https://github.com/example/example/pull/6")
 print("review-ok:" .. tostring(text ~= nil))
@@ -647,12 +644,14 @@ print("review-ok:" .. tostring(text ~= nil))
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("review-ok:true"), "stdout: {stdout}");
     assert!(
-        stdout.contains(".ptah/instructions/reviewer.md"),
-        "the configured instruction path must reach the agent, stdout: {stdout}"
+        stdout.contains(
+            "Review for correctness first. Judge each finding against this repository's severity ladder and label it blocking or non-blocking."
+        ),
+        "the configured instruction text must be inlined into the review prompt, stdout: {stdout}"
     );
     assert!(
         !stdout.contains("BLOCKING"),
-        "the built-in default must not be inlined when a document is configured, stdout: {stdout}"
+        "the built-in default must not be inlined when an instruction is configured, stdout: {stdout}"
     );
 }
 
@@ -806,7 +805,7 @@ openspec.new({ agent = ptah.agent("demo"), judgeAgnt = ptah.agent("demo") })
         "main.luau",
         r#"--!strict
 local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
-prReview.new({ agent = ptah.agent("demo"), judgeAgent = ptah.agent("judge"), reviewInstructionFile = "x.md", dryRun = "yes" })
+prReview.new({ agent = ptah.agent("demo"), judgeAgent = ptah.agent("judge"), reviewInstruction = "x.md", dryRun = "yes" })
 "#,
     );
     let (code, _stdout, stderr) = p.check(&script, &lsp_dir);
@@ -850,7 +849,7 @@ local ops = openspec.new({{ agent = inline, judgeAgent = ptah.agent("judge"), ma
 local loop = prReview.new({{
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
-	reviewInstructionFile = "doc.md",
+	reviewInstruction = "doc.md",
 	dryRun = true,
 }})
 print(ops, loop)
