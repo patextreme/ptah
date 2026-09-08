@@ -50,12 +50,18 @@ agent onward until the whole change is done or the cap kills the run.
   predicate construction), scoped log line.
 - `factory-components/components/openspec/README.md` — operations
   section documents the optional scope and its completion contract.
-- `.ptah/workflows/openspec/main.luau` — one usage-hint comment at the
-  implement call site.
+- `.ptah/workflows/openspec/main.luau` — the usage-hint comment at the
+  implement call site, plus the consumer-side restructure that landed
+  in the same edit (absorbed into this change during verification):
+  pr-review-loop wiring removed, the workflow wrapped in a
+  `processChange` helper that runs `implement-task-scope` then
+  `add-env-reads` through groom/implement/verify and a commit session.
 - `CONTEXT.md` — glossary entry (landed during the design session).
 - `crates/ptah-cli/tests/factory_components.rs` — offline coverage: a
   scoped implement run (scope text asserted in both work prompt and judge
-  predicate via the mock's prompt echo) and a nil-scope back-compat run.
+  predicate via the mock's prompt echo), a nil-scope back-compat run, and
+  an unresolvable-scope dead-end run (rejected predicate, human
+  escalation, no resolve prompt) folded in during verification.
 - No crate code changes; the library is mounted source, so consumers
   pick the new parameter up on their next mount sync. Call sites passing
   only `change` are unaffected (optional positional parameter).

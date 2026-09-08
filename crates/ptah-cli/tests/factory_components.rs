@@ -459,11 +459,127 @@ fn openspec_component_grooms_a_change() {
 
 #[test]
 fn openspec_component_implements_a_change() {
+    // Nil scope (the two-argument call): byte-for-byte compatibility —
+    // today's unscoped work prompt and judge predicate still reach the
+    // agents (the mock echoes prompts back, so both surfaces are
+    // assertable), and no scope marker leaks into the run.
     let p = Project::new("openspec-implement", &[("MOCK_SUBMIT_MATCH", &always(true))]);
     let script = openspec_shim(&p, "implement");
-    let (code, stdout, stderr) = p.run(&script, &["--quiet"]);
+    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("implement-ok:true"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(
+            "End each pass either with all tasks implemented or paused with a stated reason, as the skill defines those states."
+        ),
+        "the unscoped work prompt must be unchanged, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("All tasks of the change are implemented"),
+        "the unscoped accepted predicate must be unchanged, stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("task scope"),
+        "a nil-scope run must carry no scope markers, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn openspec_component_implements_a_scoped_change() {
+    // A task scope narrows the run to the scoped tasks: the scope text
+    // must reach exactly the two interpolation sites — the work prompt
+    // (echoed back by the mock) and the judge's accepted predicate
+    // (embedded in the judge prompt, which the mock echoes too) — since
+    // the judge never sees the work prompt. The scoped log line pins
+    // the third scoped surface.
+    let p = Project::new(
+        "openspec-implement-scoped",
+        &[("MOCK_SUBMIT_MATCH", &always(true))],
+    );
+    let script = p.write(
+        "main.luau",
+        r#"--!strict
+local openspec = require("./vendor/factory-components/components/openspec/component")
+local ops = openspec.new({
+	agent = ptah.agent("demo"),
+	judgeAgent = ptah.agent("judge"),
+	model = "work-model",
+	judgeModel = "judge-model",
+})
+local text = ops:implement("demo-change", "task group 1")
+print("scoped-implement-ok:" .. tostring(text ~= nil))
+"#,
+    );
+    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("scoped-implement-ok:true"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("The task scope for this run is: task group 1"),
+        "the scope must reach the work prompt, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Treat the tasks matching the scope as the entire job"),
+        "the scoped work prompt must redefine the job and leave other tasks pending, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("All tasks in the following task scope are implemented: \"task group 1\""),
+        "the scope must ride inside the accepted predicate the judge sees, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("openspec: implementing change demo-change (task scope: task group 1)"),
+        "the scoped log line must name the scope, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn openspec_component_implements_an_unresolvable_scope_fails() {
+    // A scope that matches no tasks dead-ends through the existing
+    // escalation path: the work prompt's "state it, don't guess"
+    // clause reaches the agent, the judge rejects the scoped accepted
+    // predicate, the human probe confirms human input — and the
+    // operation fails (exit 1) without ever issuing the resolve
+    // prompt.
+    let rules =
+        r#"[{"match":"The pause requires human input","value":true},{"match":"","value":false}]"#
+            .to_string();
+    let p = Project::new(
+        "openspec-implement-dead-end",
+        &[("MOCK_SUBMIT_MATCH", &rules)],
+    );
+    let script = p.write(
+        "main.luau",
+        r#"--!strict
+local openspec = require("./vendor/factory-components/components/openspec/component")
+local ops = openspec.new({
+	agent = ptah.agent("demo"),
+	judgeAgent = ptah.agent("judge"),
+	model = "work-model",
+	judgeModel = "judge-model",
+})
+local text = ops:implement("demo-change", "no such tasks")
+print("dead-end-ok:" .. tostring(text ~= nil))
+"#,
+    );
+    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
+    assert_eq!(code, 1, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("human input is required"),
+        "the dead-end must surface through the escalation error, stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains(
+            "If the task scope matches no tasks, end the pass stating that; do not guess or substitute"
+        ),
+        "the dead-end clause must reach the work agent, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("All tasks in the following task scope are implemented: \"no such tasks\""),
+        "the scoped predicate must reach the judge before the escalation, stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Go ahead and resolve the pause yourself"),
+        "escalation must fail before the resolve prompt reaches the agent, stdout:\n{stdout}"
+    );
 }
 
 #[test]
@@ -670,16 +786,13 @@ fn workflow(name: &str) -> PathBuf {
 
 #[test]
 fn dogfood_openspec_shim_runs() {
-    // The consolidated openspec shim (groom/verify merged in
-    // 7a63d32): the groom/implement/verify operations themselves are
-    // covered component-level above; this pins that the repo's actual
-    // shim runs against the mock — including the archive step of its
-    // verify call and the typed PR-url handoff into the review loop:
-    // the mock submits a schema-valid prUrl object for the PR-url
-    // prompt (first matching rule) and true everywhere else, so every
-    // judge predicate converges.
-    let rules = r#"[{"match":"PR url","value":{"prUrl":"https://github.com/patextreme/ptah/pull/10"}},{"match":"","value":true}]"#
-        .to_string();
+    // The openspec shim as it exists in the repo: the groom/implement/
+    // verify operations themselves are covered component-level above;
+    // this pins that the actual shim runs against the mock — it
+    // processes both of its named changes through the archive step of
+    // verify and the commit session, with every judge predicate
+    // converging under an all-true rule set.
+    let rules = r#"[{"match":"","value":true}]"#.to_string();
     let p = Project::new_env("dogfood-openspec", "pi", &[("MOCK_SUBMIT_MATCH", &rules)]);
     let (code, stdout, stderr) = p.run(&workflow("openspec/main.luau"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");

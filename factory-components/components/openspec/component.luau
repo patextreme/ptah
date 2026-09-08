@@ -24,8 +24,11 @@ export type Config = {
 export type Instance = {
 	-- Converge the change's proposal through review.
 	groom: (self: Instance, change: string) -> string,
-	-- Drive task execution to completion.
-	implement: (self: Instance, change: string) -> string,
+	-- Drive task execution to completion. The optional task scope
+	-- narrows the run (and the judge's acceptance) to the tasks
+	-- matching the free-text scope; nil scopes to every task of the
+	-- change.
+	implement: (self: Instance, change: string, scope: string?) -> string,
 	-- Converge verification, then sync and archive the change in the
 	-- same operation.
 	verify: (self: Instance, change: string) -> string,
@@ -106,18 +109,31 @@ function M.new(config: Config): Instance
 			ptah.log(`openspec: change {change} is ready to implement`)
 			return text
 		end,
-		implement = function(_self: Instance, change: string): string
-			ptah.log(`openspec: implementing change {change}`)
-			local text = drive(
-				"openspec-implement",
-				`Implement the pending tasks of the openspec change named {change} using the openspec-apply-change skill. End each pass either with all tasks implemented or paused with a stated reason, as the skill defines those states.`,
-				{
-					accepted = "All tasks of the change are implemented",
-					probePrompt = "For the pause: can you resolve it yourself (for example by updating the change's artifacts per the apply skill), or does it require human input to continue?",
-					humanPredicate = "The pause requires human input to continue",
-					resolvePrompt = "Go ahead and resolve the pause yourself, then continue implementing the remaining tasks",
-				}
-			)
+		implement = function(_self: Instance, change: string, scope: string?): string
+			-- A task scope interpolates into exactly two places: the work
+			-- prompt (which redefines the job as the scoped tasks) and the
+			-- accepted predicate (the judge never sees the work prompt, so
+			-- the scope must ride inside the predicate). A scope that
+			-- matches no tasks dead-ends through the prompt's "state it,
+			-- don't guess" clause into the pause -> human-escalation path
+			-- below. Nil scope keeps today's strings byte-for-byte.
+			local prompt: string
+			local accepted: string
+			if scope ~= nil then
+				ptah.log(`openspec: implementing change {change} (task scope: {scope})`)
+				prompt = `Implement the pending tasks of the openspec change named {change} using the openspec-apply-change skill. The task scope for this run is: {scope}. Treat the tasks matching the scope as the entire job: implement those, leave all other tasks pending, and end each pass either with the scoped tasks implemented or paused with a stated reason, as the skill defines those states. If the task scope matches no tasks, end the pass stating that; do not guess or substitute.`
+				accepted = `All tasks in the following task scope are implemented: "{scope}"`
+			else
+				ptah.log(`openspec: implementing change {change}`)
+				prompt = `Implement the pending tasks of the openspec change named {change} using the openspec-apply-change skill. End each pass either with all tasks implemented or paused with a stated reason, as the skill defines those states.`
+				accepted = "All tasks of the change are implemented"
+			end
+			local text = drive("openspec-implement", prompt, {
+				accepted = accepted,
+				probePrompt = "For the pause: can you resolve it yourself (for example by updating the change's artifacts per the apply skill), or does it require human input to continue?",
+				humanPredicate = "The pause requires human input to continue",
+				resolvePrompt = "Go ahead and resolve the pause yourself, then continue implementing the remaining tasks",
+			})
 			ptah.log(`openspec: change {change} is implemented`)
 			return text
 		end,
