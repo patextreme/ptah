@@ -37,6 +37,13 @@ The data-only configuration table a consumer repo passes into a Component or
 stdlib call. Functions are not configuration.
 _Avoid_: settings, options file
 
+**Task scope**:
+The per-call description of which tasks an implement run is responsible
+for. Completion — and the convergence loop's acceptance — is judged
+against the scope, not against the whole change.
+_Avoid_: filter (the component cannot see the tasks), instruction (a
+scope redefines completion; an instruction does not)
+
 **Reviewer instruction**:
 The text that tells the work agent how to review — a configured instruction
 in Local config, or the component's built-in default. A long or repo-pinned
