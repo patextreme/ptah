@@ -10,33 +10,34 @@ local piAgent = ptah.agent("pi")
 
 -- COMPONENTS
 local openspec = require("../../../factory-components/components/openspec/component")
-local prReview = require("../../../factory-components/components/pr-review-loop/component")
 local opsx = openspec.new({
 	agent = piAgent,
 	judgeAgent = piAgent,
 	model = "zai/glm-5.3",
 	judgeModel = "zai/glm-5.3-flash",
 })
-local prr = prReview.new({
-	agent = piAgent,
-	judgeAgent = piAgent,
-	model = "zai/glm-5.3",
-	judgeModel = "zai/glm-5.3-flash",
-	dryRun = false,
-	maxIterations = 15,
-})
 
 -- WORKFLOW
-local changeName = "pr-review-direct-instruction"
+local function processChange(changeName: string)
+	opsx:groom(changeName)
+	-- opsx:implement(changeName, "task group 1")
+	opsx:implement(changeName)
+	opsx:verify(changeName)
 
-opsx:groom(changeName)
-opsx:implement(changeName)
-opsx:verify(changeName)
+	piAgent
+		:session({
+			id = "committer",
+			resultSchema = { prUrl = { type = "string" } },
+		})
+		:prompt("Commit the uncommitted changes (except the .ptah directory) and push to remote")
+end
 
-local session = piAgent:session({
-	id = "committer",
-	resultSchema = { prUrl = { type = "string" } },
-})
-session:prompt("Commit the uncommitted changes (except the .ptah directory) and push to remote")
-local result = session:prompt("What is the PR url? Pass the url back to the ptah via result submit tool")
-prr:review(result.result.prUrl :: string)
+opsx:verify("implement-task-scope")
+piAgent
+	:session({
+		id = "committer",
+		resultSchema = { prUrl = { type = "string" } },
+	})
+	:prompt("Commit the uncommitted changes (except the .ptah directory) and push to remote")
+
+processChange("add-env-reads")
