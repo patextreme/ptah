@@ -49,7 +49,7 @@
         else if pkgs.lib.hasSuffix "/.ptah/workflows" path
         then type == "directory"
         else if pkgs.lib.hasInfix "/.ptah/workflows/" path
-        then pkgs.lib.hasSuffix ".luau" path
+        then type == "directory" || pkgs.lib.hasSuffix ".luau" path
         else if pkgs.lib.hasSuffix "/factory-components" path
         then type == "directory"
         else if pkgs.lib.hasInfix "/factory-components/" path

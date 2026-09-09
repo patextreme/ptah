@@ -37,8 +37,44 @@ The data-only configuration table a consumer repo passes into a Component or
 stdlib call. Functions are not configuration.
 _Avoid_: settings, options file
 
+**Task scope**:
+The per-call description of which tasks an implement run is responsible
+for. Completion — and the convergence loop's acceptance — is judged
+against the scope, not against the whole change.
+_Avoid_: filter (the component cannot see the tasks), instruction (a
+scope redefines completion; an instruction does not)
+
+**Reviewer instruction**:
+The text that tells the work agent how to review — a configured instruction
+in Local config, or the component's built-in default. A long or repo-pinned
+one points at a versioned document rather than inlining text.
+_Avoid_: instruction document, review instruction, prompt
+
 **Mount point**:
 The location in a consumer repo where the Factory Components tree is made
 available (symlink, submodule, vendored copy). Library code only requires
 within its own tree, so the mount point is the consumer's free choice.
 _Avoid_: vendor dir (that is one mounting mechanism, not the concept)
+
+**Source definitions**:
+The hand-maintained `.ptah/ptah.d.luau` in the ptah repo: the single source
+of truth for script-API types, embedded into the binary at build time.
+_Avoid_: the defs file, types file
+
+**Embedded definitions**:
+The definitions a ptah binary carries (compiled from the source definitions)
+and emits via `ptah types` and `ptah init`, prefixed with a version header
+identifying the emitting binary.
+_Avoid_: bundled types
+
+**Project definitions**:
+A consumer project's `.ptah/ptah.d.luau`: a derived copy of the embedded
+definitions. `ptah init` scaffolds the registry skeleton but syncs the
+project definitions; it is never hand-edited.
+_Avoid_: local defs, user definitions
+
+**ptah's environment**:
+The environment variables ptah inherits from its parent process, captured
+once at startup. The read-only source behind `${VAR}` interpolation, agent
+and shell-step inheritance, and script reads.
+_Avoid_: the env, process env, environment config (that names the agent registry)

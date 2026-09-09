@@ -116,6 +116,7 @@ fn exec_lua(runner: Option<Arc<dyn ProcessRunner>>, sink: Arc<dyn EventSink>) ->
         process_runner: runner,
         shutdown: None,
         renderer: sink,
+        env: std::collections::BTreeMap::new(),
     };
     script::setup_lua(&cfg).unwrap()
 }

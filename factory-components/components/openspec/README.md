@@ -55,6 +55,16 @@ Per-call data is a method argument:
   resolve itself (e.g. updating the change's artifacts) is resolved and
   the loop continues; a pause that needs human input fails the
   operation.
+- `ops:implement(change, scope)` — same loop with a task scope: free
+  text describing the subset of the change's tasks the run is
+  responsible for (e.g. `"task group 1"`, `"the env-reads tasks"`).
+  The work prompt treats the tasks matching the scope as the entire
+  job (all other tasks stay pending), and the judge accepts the pass
+  when the scoped tasks are implemented — not when the whole change
+  is. A scope that matches no tasks ends the pass stating that (the
+  agent must not substitute a different subset), which fails the
+  operation through the human-escalation path. Calling without a
+  scope keeps the whole-change behavior byte-for-byte.
 - `ops:verify(change)` — converge verification
   (`openspec-verify-change`) until it reports no critical findings or
   warnings, then sync and archive the change in the same operation.

@@ -68,7 +68,8 @@ ptah --version
   errors
 - `ptah init` — scaffold `./.ptah/` with the type definitions and a
   commented registry skeleton (see [Editor setup](#editor-setup));
-  skips files that already exist
+  the config skeleton is created once and left alone, the definitions
+  are synced to the installed binary
 
 Exit codes: `0` on success, `1` on an uncaught script error or a never-observed
 task error (printed to stderr), `2` on CLI/usage errors, `n` when the script
@@ -355,13 +356,19 @@ results. Never an error, never a hang. Scripts that must have a value
 write a nil-check retry loop, as above.
 
 Scripts run in a sandboxed Luau environment: `string`, `table`, `math`,
-`utf8`, `bit32`, `buffer`, `os.time`, `os.clock`, and `print` — no file I/O,
-network, or debug facilities. `require` resolves `.luau` modules relative to
+`utf8`, `bit32`, `buffer`, `os.time`, `os.clock`, `os.getenv`, and `print` —
+no file I/O, network, or debug facilities. `require` resolves `.luau` modules relative to
 the requiring file with no directory boundary (`require("../shared/helper")`
 reaches sibling trees); non-relative require strings (absolute paths, bare
 module names, aliases) are rejected. Scripts are trusted code — they drive
 agents with your full authority, and the sandbox limits the blast radius of
-bugs, not malice. (One deviation: a restricted `coroutine` table containing
+bugs, not malice. `os.getenv` fits that posture: it is the single
+environment-read surface, observing a snapshot of ptah's environment taken
+once when the run starts — read-only, not enumerable, and not mutable from
+the script (`os.setenv` does not exist; variables whose values are not
+valid UTF-8 read as unset). Environment values — secrets included — are
+therefore script-readable, exactly like the shell profile that set them.
+(One deviation: a restricted `coroutine` table containing
 only `yield` remains visible because the embedded async runtime needs it;
 the scheduling primitives are absent.)
 
@@ -561,9 +568,15 @@ directory with exactly two files —
   (see the comments there for the two-layer discovery and `${VAR}`
   interpolation rules).
 
-Existing files are skipped, never overwritten — re-running `ptah init`
-is safe. After upgrading ptah, refresh the definitions without
-re-running init:
+The two files have different ownership. `.ptah/config.toml` is
+user-authored: created once, reported as skipped on every later run,
+never modified. `.ptah/ptah.d.luau` is a derived artifact of the
+installed binary: init syncs it — created when absent, overwritten
+whenever its bytes differ from the current binary's output, reported
+`up to date` when it already matches. So re-running `ptah init` after
+upgrading ptah is the primary way to refresh the definitions. The
+documented alternative — for scripting, or refreshing without touching
+config — is:
 
 ```sh
 ptah types > .ptah/ptah.d.luau
@@ -574,7 +587,7 @@ violations flagged before a run — by pointing
 [luau-lsp](https://github.com/luau-lsp/luau-lsp) at `.ptah/ptah.d.luau`.
 Start scripts with `--!strict` for full checking (the
 [bundled examples](examples/) do). The definitions also model the sandbox —
-`os` trimmed to `time`/`clock`, `coroutine` to `yield`, and
+`os` trimmed to `time`/`clock`/`getenv`, `coroutine` to `yield`, and
 `loadstring`/`collectgarbage` unavailable — so editor-approved code cannot
 reach a global the runtime poisons. Definitions apply workspace-wide, so
 keep them out of mixed Luau projects you don't run under ptah.
@@ -647,9 +660,9 @@ library: repo-agnostic stdlib helpers (`std/`) — the typed boolean
 judge (`predicate`), the GitHub CLI transport (`gh`), and the repo-loop
 skeleton (`daemon`) — plus
 composable workflow components (`components/`) such as the openspec
-lifecycle and a PR review loop. This repo's own
-`.ptah/workflows/*.luau` are shims over it (dogfooding is what keeps
-the copies from drifting).
+lifecycle and a PR review loop. The scripts under
+`.ptah/workflows/` are shims over it (dogfooding is what keeps the copies
+from drifting).
 
 The library is consumed as **source**: mount the tree wherever you
 like (nix flake input + symlink, git submodule, vendored copy) and

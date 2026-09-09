@@ -1,6 +1,7 @@
 //! `ptah init` e2e: the real binary scaffolds `./.ptah` in a tempdir —
 //! exactly two files, definitions byte-identical to `ptah types`
-//! stdout, skip-don't-clobber idempotence, hints on every run, and a
+//! stdout, split existing-file semantics (config skipped, definitions
+//! synced: created / updated / up to date), hints on every run, and a
 //! clean failure when the target can't be written.
 
 use std::path::Path;
@@ -22,6 +23,14 @@ fn init(dir: &Path) -> (i32, String, String) {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+/// `ptah types` stdout — the current emit the definitions are synced
+/// against.
+fn types_stdout() -> Vec<u8> {
+    let out = Command::new(ptah_bin()).arg("types").output().unwrap();
+    assert!(out.status.success(), "`ptah types` failed");
+    out.stdout
 }
 
 #[test]
@@ -112,11 +121,11 @@ fn rerunning_init_reports_skips_and_is_idempotent() {
     );
     assert!(
         stdout.contains("skipped (exists): .ptah/config.toml"),
-        "skip line missing: {stdout}"
+        "config skip line missing: {stdout}"
     );
     assert!(
-        stdout.contains("skipped (exists): .ptah/ptah.d.luau"),
-        "skip line missing: {stdout}"
+        stdout.contains("up to date: .ptah/ptah.d.luau"),
+        "definitions up-to-date line missing: {stdout}"
     );
     assert!(
         stdout.contains("Next steps"),
@@ -130,7 +139,105 @@ fn rerunning_init_reports_skips_and_is_idempotent() {
     assert_eq!(
         std::fs::read(dir.path().join(".ptah").join("ptah.d.luau")).unwrap(),
         first_defs,
-        "re-run must leave ptah.d.luau byte-identical"
+        "re-run must leave an up-to-date ptah.d.luau byte-identical"
+    );
+}
+
+#[test]
+fn stale_definitions_are_updated_with_version_arrow() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".ptah")).unwrap();
+    // A fabricated older emit: a genuine ptah header naming an older
+    // version plus a body that differs from the current one.
+    std::fs::write(
+        dir.path().join(".ptah").join("ptah.d.luau"),
+        "-- ptah 0.0.1 type definitions\n-- stale body\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = init(dir.path());
+    assert_eq!(
+        code,
+        0,
+        "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join(".ptah").join("ptah.d.luau")).unwrap(),
+        types_stdout(),
+        "stale definitions must be overwritten with the current emit"
+    );
+    assert!(
+        stdout.contains("updated"),
+        "update line missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("(0.0.1 -> "),
+        "version arrow must carry the parsed old version: {stdout}"
+    );
+}
+
+#[test]
+fn modified_or_foreign_definitions_are_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".ptah")).unwrap();
+    // Differing content whose first line is not a ptah header — a
+    // hand-edited or foreign file, overwritten all the same.
+    std::fs::write(
+        dir.path().join(".ptah").join("ptah.d.luau"),
+        "--!strict\n-- hand-edited definitions\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = init(dir.path());
+    assert_eq!(
+        code,
+        0,
+        "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join(".ptah").join("ptah.d.luau")).unwrap(),
+        types_stdout(),
+        "modified definitions must be overwritten with the current emit"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l == "updated: .ptah/ptah.d.luau"),
+        "update line must carry no version suffix: {stdout}"
+    );
+}
+
+#[test]
+fn source_layout_definitions_report_up_to_date() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".ptah")).unwrap();
+    // The repo-root scenario (design D2): the file laid out like the
+    // repository's own source definitions — `ptah types` stdout minus
+    // its header line. It must report current, never be rewritten
+    // with a prepended header.
+    let emitted = types_stdout();
+    let body = emitted
+        .splitn(2, |&b: &u8| b == b'\n')
+        .nth(1)
+        .expect("emit has a header line")
+        .to_vec();
+    let defs = dir.path().join(".ptah").join("ptah.d.luau");
+    std::fs::write(&defs, &body).unwrap();
+
+    let (code, stdout, stderr) = init(dir.path());
+    assert_eq!(
+        code,
+        0,
+        "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("up to date: .ptah/ptah.d.luau"),
+        "source-layout definitions must report up to date: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&defs).unwrap(),
+        body,
+        "source-layout definitions must be left byte-identical (no prepended header)"
     );
 }
 

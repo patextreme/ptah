@@ -1,9 +1,9 @@
 --!strict
 -- PR review loop component: run a review→fix→push convergence against a
 -- pull request, generalized from identus-ws's pr-review-loop — repo
--- specifics (reviewer instruction document, dry-run gating) arrive as
--- config, with the built-in default instruction standing in when no
--- document is configured, and the PR URL is the sole repository
+-- specifics (reviewer instruction, dry-run gating) arrive as config,
+-- with the built-in default instruction standing in when none is
+-- configured, and the PR URL is the sole repository
 -- context. The loop is this component's own policy
 -- over std.predicate (following the shared conventions in ../README.md):
 -- escalation probes blocking findings with a subagent before asking,
@@ -21,15 +21,15 @@ export type Config = {
 	-- Optional per-session model config ids for work and judge sessions.
 	model: string?,
 	judgeModel: string?,
-	-- Optional repository-relative path of a reviewer instruction
-	-- document. A configured document must define what counts as a
-	-- blocking issue for this repository and instruct the reviewer to
-	-- classify findings as blocking or non-blocking — the instruction
-	-- contract (see the README): the judge predicates and fix prompts
-	-- below speak that fixed vocabulary. When omitted, reviews run
-	-- against the built-in default instruction; a configured document
-	-- wins.
-	reviewInstructionFile: string?,
+	-- Optional reviewer instruction as direct text — the entire
+	-- instruction when configured. It must define what counts as a
+	-- blocking issue for this repository and direct the reviewer to
+	-- classify each finding as blocking or non-blocking — the
+	-- instruction contract (see the README): the judge predicates and
+	-- fix prompts below speak that fixed vocabulary. Only a nil value
+	-- selects the built-in default instruction; a configured
+	-- instruction fully replaces it (an empty string stays configured).
+	reviewInstruction: string?,
 	-- When true the commit/push step is skipped: the loop converges on
 	-- reviews and fixes but never pushes to the PR branch.
 	dryRun: boolean?,
@@ -48,8 +48,7 @@ local DEFAULT_MAX_ITERATIONS = 15
 local M = {}
 
 function M.new(config: Config): Instance
-	local maxIterations =
-		if config.maxIterations ~= nil then config.maxIterations else DEFAULT_MAX_ITERATIONS
+	local maxIterations = if config.maxIterations ~= nil then config.maxIterations else DEFAULT_MAX_ITERATIONS
 	local dryRun = config.dryRun == true
 	local work: Agent = config.agent
 
@@ -69,23 +68,23 @@ function M.new(config: Config): Instance
 					session:setConfig("model", config.model)
 				end
 
-				-- The instruction branch: a configured document wins over the
-				-- built-in default. The classification ask stays in both
-				-- branches — enforcement for instruction documents that
-				-- under-specify the output format (redundant with a compliant
-				-- document by design).
-				local reviewAsk: string
-				if config.reviewInstructionFile ~= nil then
-					reviewAsk = `Use the review instruction at {config.reviewInstructionFile} to review PR {prUrl}. Based on the review feedback, determine the blocking issues and the non-blocking issues.`
-				else
-					reviewAsk = `Use the following review instruction:\n\n{defaultInstruction}\n\n---\n\nUsing this instruction, review PR {prUrl}. Based on the review feedback, determine the blocking issues and the non-blocking issues.`
-				end
+				-- One template serves any instruction: configured text fully
+				-- replaces the built-in default, `or` being exactly the
+				-- nil-only fallback (empty string is truthy and stays
+				-- configured). The classification ask stays — enforcement
+				-- for instructions that under-specify the output format
+				-- (redundant with a compliant instruction by design).
+				local instruction = config.reviewInstruction or defaultInstruction
+				local reviewAsk =
+					`Use the following review instruction:\n\n{instruction}\n\n---\n\nUsing this instruction, review PR {prUrl}. Based on the review feedback, determine the blocking issues and the non-blocking issues.`
 				local outcome = session:prompt(header .. reviewAsk)
-				if predicate("The review verdict does not contain blocking issues", outcome.text, {
-					agent = config.judgeAgent,
-					model = config.judgeModel,
-					sessionId = `pr-review-judge:{iteration}`,
-				}) then
+				if
+					predicate("The review verdict does not contain blocking issues", outcome.text, {
+						agent = config.judgeAgent,
+						model = config.judgeModel,
+						sessionId = `pr-review-judge:{iteration}`,
+					})
+				then
 					-- The converged session posts the verdict comment.
 					session:prompt(header .. "Please comment on the PR with the review feedback along with the verdict")
 					session:close()
@@ -99,15 +98,11 @@ function M.new(config: Config): Instance
 					header
 						.. "For each of the blocking issues, validate with a subagent whether the issue is real. For the blocking issues that remain, do you know how to resolve them, or do you need human input?"
 				)
-				local needsHuman = predicate(
-					"Human input is required to resolve the blocking issues",
-					probe.text,
-					{
-						agent = config.judgeAgent,
-						model = config.judgeModel,
-						sessionId = `pr-review-human:{iteration}`,
-					}
-				)
+				local needsHuman = predicate("Human input is required to resolve the blocking issues", probe.text, {
+					agent = config.judgeAgent,
+					model = config.judgeModel,
+					sessionId = `pr-review-human:{iteration}`,
+				})
 				if needsHuman then
 					session:close()
 					error(

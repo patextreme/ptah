@@ -67,6 +67,10 @@ MOCK_CONFIG_ECHO = "model"
         .arg("run")
         .arg(&script_path)
         .current_dir(&dir)
+        // PTAH_ENV_* exercise os.getenv's snapshot inside the probe:
+        // set, unset (absent from this Command), and set-to-empty.
+        .env("PTAH_ENV_PROBE", "x")
+        .env("PTAH_ENV_EMPTY", "")
         .output()
         .expect("run ptah");
     let stdout = String::from_utf8_lossy(&output.stdout);

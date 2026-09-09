@@ -12,6 +12,9 @@ fixture only — never part of the CLI surface). API/behavior details are in
   rustc, no rustup). All Rust work happens inside the dev shell.
 - `cargo build` / `cargo test` — plain cargo works inside the dev shell.
 - Single suite/filter: `cargo test --test e2e`, `cargo test --test acp <name>`.
+- `stylua .` — format Luau from the repo root (StyLua defaults; the check
+  gate enforces them, `.styluaignore` exempts the generated definitions).
+- `ptah check <script>` — run on every `.luau` file you edit.
 - `nix build` — release build via crane.
 - `nix flake check` — full suite in the sandbox.
 
@@ -36,6 +39,9 @@ the same pin. Don't update the pin casually.
 - `crates/ptah-core/tests/deps_guard.rs` self-scans core's sources for
   forbidden imports (real I/O, adapters, non-schema ACP, …) with a pinned
   allowlist of settled exceptions; it runs as part of the normal suite.
+- `nix flake check` enforces both Luau gates over the repo's own scripts: the
+  StyLua formatter check and an in-place `ptah check` pass (release binary,
+  synthesized registry) over the bundled entry scripts.
 
 ## Architecture
 
@@ -113,3 +119,7 @@ This repo uses spec-driven development (`openspec/`). Changes live in
 lifecycle instead of freelancing. `openspec/specs/` holds the synced truth.
 
 Scratch/artifact dirs `.work/`, `.pi/taskflows/`, `worktrees/` are gitignored.
+
+## Git and PR conventions
+
+- Commit messages and pull request titles follow [Conventional Commits](https://www.conventionalcommits.org/): `<type>[optional scope]: <imperative description>` (for example, `feat: add environment typings`). Use a concise subject without a trailing period; the PR title should describe the overall change.

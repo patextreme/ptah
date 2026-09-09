@@ -30,16 +30,24 @@ fn project(example: &str, agent_env: &[(&str, &str)]) -> PathBuf {
 }
 
 fn run_example(example: &str, agent_env: &[(&str, &str)]) {
+    run_example_with_ptah_env(example, agent_env, &[]);
+}
+
+/// Like [`run_example`], plus environment entries set on the ptah
+/// process itself — the snapshot `os.getenv` reads. Distinct from
+/// `agent_env`, which lands in the registry's `[agents.demo.env]` and
+/// shapes the agent subprocess, not ptah.
+fn run_example_with_ptah_env(example: &str, agent_env: &[(&str, &str)], ptah_env: &[(&str, &str)]) {
     let dir = project(example, agent_env);
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples")
         .join(example);
-    let output = Command::new(ptah_bin())
-        .arg("run")
-        .arg(&script)
-        .current_dir(&dir)
-        .output()
-        .expect("run ptah");
+    let mut cmd = Command::new(ptah_bin());
+    cmd.arg("run").arg(&script).current_dir(&dir);
+    for (k, v) in ptah_env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("run ptah");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -96,6 +104,21 @@ fn example_model_fanout() {
                 r#"[{"id":"model","name":"Model","type":"select","currentValue":"sonnet","options":[{"value":"sonnet","name":"Sonnet"},{"value":"opus","name":"Opus"},{"value":"haiku","name":"Haiku"}]}]"#,
             ),
             ("MOCK_CONFIG_ECHO", "model"),
+        ],
+    );
+}
+
+#[test]
+fn example_env() {
+    // PTAH_EXAMPLE_* ride the ptah process env (os.getenv's snapshot);
+    // PTAH_EXAMPLE_REVIEWER and PTAH_EXAMPLE_EXTRA stay unset to
+    // exercise the fallback / empty-distinguishing branches.
+    run_example_with_ptah_env(
+        "env.luau",
+        &[],
+        &[
+            ("PTAH_EXAMPLE_MODEL", "haiku"),
+            ("PTAH_EXAMPLE_VERBOSE", "1"),
         ],
     );
 }

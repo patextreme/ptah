@@ -56,7 +56,7 @@ owns its own agent subprocess; closing a session reaps the process.
 ## Script rules (the sandbox)
 
 Scripts run in a curated Luau environment. Available: `string`, `table`,
-`math`, `utf8`, `bit32`, `buffer`, `os.time`, `os.clock`, `print`, the
+`math`, `utf8`, `bit32`, `buffer`, `os.time`, `os.clock`, `os.getenv`, `print`, the
 standard Luau base library (`pcall`, `error`, `assert`, `tostring`,
 `tonumber`, `pairs`, `ipairs`, `select`, `type`/`typeof`,
 `setmetatable`/`getmetatable`, `rawget`/`rawset`, …), and a restricted
@@ -411,6 +411,12 @@ env = { ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}" }
 empty); `env` merges over the inherited environment. Process-level env
 cannot vary per session — per-session model fan-out is exactly what
 `setConfig` is for.
+
+Scripts read that same environment directly with `os.getenv(name)` (the
+only env-read surface): it observes a snapshot taken when the run starts,
+returns `nil` for unset variables (`os.getenv("X") or "fallback"` is the
+idiom — an explicitly empty value returns `""`, distinct from unset), and
+neither enumerates nor mutates anything.
 
 ## `ptah check` and pre-flight
 

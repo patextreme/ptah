@@ -252,4 +252,38 @@ fn real_luau_lsp_definitions_contract() {
         stderr.contains("Key 'load' not found in table 'Json'"),
         "diagnostic must name the Json module type, stderr:\n{stderr}"
     );
+
+    // type-definitions "Definitions model the sandbox" (os mirror):
+    // `os.getenv` is a member of the trimmed os table — editor-approved
+    // code using it analyzes clean.
+    let p = Project::new("os-getenv-member");
+    let script = p.write(
+        "--!strict\n\
+         local v: string? = os.getenv(\"HOME\")\n\
+         print(v)\n",
+    );
+    let (code, stdout, stderr) = p.check(&script, lsp_dir);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.is_empty(), "stdout: {stdout}");
+    assert!(
+        !stderr.contains("TypeError"),
+        "os.getenv is a defs member — no diagnostic expected, stderr:\n{stderr}"
+    );
+
+    // Same requirement, rejecting side: `os.date` is trimmed from the
+    // defs, so analysis flags it instead of the call failing at runtime.
+    let p = Project::new("os-date-removed");
+    let script = p.write("--!strict\n print(os.date(\"%Y\"))\n");
+    let (code, _stdout, stderr) = p.check(&script, lsp_dir);
+    assert_eq!(code, 1, "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("Key 'date' not found in table"),
+        "diagnostic must flag the trimmed os table, stderr:\n{stderr}"
+    );
+    // The rendered shape is the trimmed os surface itself — time,
+    // clock, getenv — so the assertion also pins the mirror content.
+    assert!(
+        stderr.contains("getenv"),
+        "diagnostic shows the trimmed os members, stderr:\n{stderr}"
+    );
 }

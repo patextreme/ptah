@@ -459,11 +459,127 @@ fn openspec_component_grooms_a_change() {
 
 #[test]
 fn openspec_component_implements_a_change() {
+    // Nil scope (the two-argument call): byte-for-byte compatibility —
+    // today's unscoped work prompt and judge predicate still reach the
+    // agents (the mock echoes prompts back, so both surfaces are
+    // assertable), and no scope marker leaks into the run.
     let p = Project::new("openspec-implement", &[("MOCK_SUBMIT_MATCH", &always(true))]);
     let script = openspec_shim(&p, "implement");
-    let (code, stdout, stderr) = p.run(&script, &["--quiet"]);
+    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("implement-ok:true"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(
+            "End each pass either with all tasks implemented or paused with a stated reason, as the skill defines those states."
+        ),
+        "the unscoped work prompt must be unchanged, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("All tasks of the change are implemented"),
+        "the unscoped accepted predicate must be unchanged, stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("task scope"),
+        "a nil-scope run must carry no scope markers, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn openspec_component_implements_a_scoped_change() {
+    // A task scope narrows the run to the scoped tasks: the scope text
+    // must reach exactly the two interpolation sites — the work prompt
+    // (echoed back by the mock) and the judge's accepted predicate
+    // (embedded in the judge prompt, which the mock echoes too) — since
+    // the judge never sees the work prompt. The scoped log line pins
+    // the third scoped surface.
+    let p = Project::new(
+        "openspec-implement-scoped",
+        &[("MOCK_SUBMIT_MATCH", &always(true))],
+    );
+    let script = p.write(
+        "main.luau",
+        r#"--!strict
+local openspec = require("./vendor/factory-components/components/openspec/component")
+local ops = openspec.new({
+	agent = ptah.agent("demo"),
+	judgeAgent = ptah.agent("judge"),
+	model = "work-model",
+	judgeModel = "judge-model",
+})
+local text = ops:implement("demo-change", "task group 1")
+print("scoped-implement-ok:" .. tostring(text ~= nil))
+"#,
+    );
+    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("scoped-implement-ok:true"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("The task scope for this run is: task group 1"),
+        "the scope must reach the work prompt, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Treat the tasks matching the scope as the entire job"),
+        "the scoped work prompt must redefine the job and leave other tasks pending, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("All tasks in the following task scope are implemented: \"task group 1\""),
+        "the scope must ride inside the accepted predicate the judge sees, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("openspec: implementing change demo-change (task scope: task group 1)"),
+        "the scoped log line must name the scope, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn openspec_component_implements_an_unresolvable_scope_fails() {
+    // A scope that matches no tasks dead-ends through the existing
+    // escalation path: the work prompt's "state it, don't guess"
+    // clause reaches the agent, the judge rejects the scoped accepted
+    // predicate, the human probe confirms human input — and the
+    // operation fails (exit 1) without ever issuing the resolve
+    // prompt.
+    let rules =
+        r#"[{"match":"The pause requires human input","value":true},{"match":"","value":false}]"#
+            .to_string();
+    let p = Project::new(
+        "openspec-implement-dead-end",
+        &[("MOCK_SUBMIT_MATCH", &rules)],
+    );
+    let script = p.write(
+        "main.luau",
+        r#"--!strict
+local openspec = require("./vendor/factory-components/components/openspec/component")
+local ops = openspec.new({
+	agent = ptah.agent("demo"),
+	judgeAgent = ptah.agent("judge"),
+	model = "work-model",
+	judgeModel = "judge-model",
+})
+local text = ops:implement("demo-change", "no such tasks")
+print("dead-end-ok:" .. tostring(text ~= nil))
+"#,
+    );
+    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
+    assert_eq!(code, 1, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("human input is required"),
+        "the dead-end must surface through the escalation error, stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains(
+            "If the task scope matches no tasks, end the pass stating that; do not guess or substitute"
+        ),
+        "the dead-end clause must reach the work agent, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("All tasks in the following task scope are implemented: \"no such tasks\""),
+        "the scoped predicate must reach the judge before the escalation, stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Go ahead and resolve the pause yourself"),
+        "escalation must fail before the resolve prompt reaches the agent, stdout:\n{stdout}"
+    );
 }
 
 #[test]
@@ -538,7 +654,7 @@ ops:groom("demo-change")
 
 #[test]
 fn pr_review_loop_converges_review_fix_push() {
-    // Default mode (no `reviewInstructionFile` — this repo's own
+    // Default mode (no `reviewInstruction` — this repo's own
     // dogfood configuration): the loop runs against the built-in
     // default instruction. Judge rules: the second review pass passes
     // (the fix landed), the escalation predicate never needs a human,
@@ -616,19 +732,16 @@ print("review-ok:" .. tostring(text ~= nil))
 
 #[test]
 fn pr_review_loop_configured_instruction_wins_over_default() {
-    // File-mode precedence: a test-authored instruction document is
-    // configured via `reviewInstructionFile`; its path must reach the
-    // agent (file mode references the document, it does not inline
-    // it), while the built-in default's classification directive
-    // (uppercase BLOCKING) must not — a configured document wins over
-    // the default.
+    // Replace semantics: test-authored instruction text is
+    // configured via `reviewInstruction`; the text must be inlined
+    // into the echoed review prompt, while the built-in default's
+    // classification directive (uppercase BLOCKING) must not appear —
+    // a configured instruction fully replaces the default (the
+    // test's own text deliberately avoids the uppercase directive,
+    // so only the inlined default could match it).
     let p = Project::new(
-        "pr-review-file-wins",
+        "pr-review-instruction-wins",
         &[("MOCK_SUBMIT_MATCH", &converges_on_second_pass())],
-    );
-    p.write(
-        ".ptah/instructions/reviewer.md",
-        "# Reviewer instruction\n\nThis repository's own classification policy.\n",
     );
     let script = p.write(
         "main.luau",
@@ -637,7 +750,7 @@ local prReview = require("./vendor/factory-components/components/pr-review-loop/
 local loop = prReview.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
-	reviewInstructionFile = ".ptah/instructions/reviewer.md",
+	reviewInstruction = "Review for correctness first. Judge each finding against this repository's severity ladder and label it blocking or non-blocking.",
 })
 local text = loop:review("https://github.com/example/example/pull/6")
 print("review-ok:" .. tostring(text ~= nil))
@@ -647,12 +760,14 @@ print("review-ok:" .. tostring(text ~= nil))
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("review-ok:true"), "stdout: {stdout}");
     assert!(
-        stdout.contains(".ptah/instructions/reviewer.md"),
-        "the configured instruction path must reach the agent, stdout: {stdout}"
+        stdout.contains(
+            "Review for correctness first. Judge each finding against this repository's severity ladder and label it blocking or non-blocking."
+        ),
+        "the configured instruction text must be inlined into the review prompt, stdout: {stdout}"
     );
     assert!(
         !stdout.contains("BLOCKING"),
-        "the built-in default must not be inlined when a document is configured, stdout: {stdout}"
+        "the built-in default must not be inlined when an instruction is configured, stdout: {stdout}"
     );
 }
 
@@ -671,18 +786,15 @@ fn workflow(name: &str) -> PathBuf {
 
 #[test]
 fn dogfood_openspec_shim_runs() {
-    // The consolidated openspec shim (groom/verify merged in
-    // 7a63d32): the groom/implement/verify operations themselves are
-    // covered component-level above; this pins that the repo's actual
-    // shim runs against the mock — including the archive step of its
-    // verify call and the typed PR-url handoff into the review loop:
-    // the mock submits a schema-valid prUrl object for the PR-url
-    // prompt (first matching rule) and true everywhere else, so every
-    // judge predicate converges.
-    let rules = r#"[{"match":"PR url","value":{"prUrl":"https://github.com/patextreme/ptah/pull/10"}},{"match":"","value":true}]"#
-        .to_string();
+    // The openspec shim as it exists in the repo: the groom/implement/
+    // verify operations themselves are covered component-level above;
+    // this pins that the actual shim runs against the mock — it
+    // processes both of its named changes through the archive step of
+    // verify and the commit session, with every judge predicate
+    // converging under an all-true rule set.
+    let rules = r#"[{"match":"","value":true}]"#.to_string();
     let p = Project::new_env("dogfood-openspec", "pi", &[("MOCK_SUBMIT_MATCH", &rules)]);
-    let (code, stdout, stderr) = p.run(&workflow("openspec.luau"), &["--no-color"]);
+    let (code, stdout, stderr) = p.run(&workflow("openspec/main.luau"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("Please sync and archive the change"),
@@ -697,7 +809,7 @@ fn dogfood_pr_review_loop_shim_runs() {
         "pi",
         &[("MOCK_SUBMIT_MATCH", &converges_on_second_pass())],
     );
-    let (code, stdout, stderr) = p.run(&workflow("pr-review-loop.luau"), &["--no-color"]);
+    let (code, stdout, stderr) = p.run(&workflow("pr-review-loop/main.luau"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("push them to the PR branch"),
@@ -806,7 +918,7 @@ openspec.new({ agent = ptah.agent("demo"), judgeAgnt = ptah.agent("demo") })
         "main.luau",
         r#"--!strict
 local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
-prReview.new({ agent = ptah.agent("demo"), judgeAgent = ptah.agent("judge"), reviewInstructionFile = "x.md", dryRun = "yes" })
+prReview.new({ agent = ptah.agent("demo"), judgeAgent = ptah.agent("judge"), reviewInstruction = "x.md", dryRun = "yes" })
 "#,
     );
     let (code, _stdout, stderr) = p.check(&script, &lsp_dir);
@@ -850,7 +962,7 @@ local ops = openspec.new({{ agent = inline, judgeAgent = ptah.agent("judge"), ma
 local loop = prReview.new({{
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
-	reviewInstructionFile = "doc.md",
+	reviewInstruction = "doc.md",
 	dryRun = true,
 }})
 print(ops, loop)

@@ -202,6 +202,7 @@ declare os: {
 		isdst: boolean?,
 	}?) -> number,
 	clock: () -> number,
+	getenv: (name: string) -> string?,
 }
 
 declare coroutine: {
