@@ -75,7 +75,8 @@ function M.new(config: Config): Instance
 				-- for instructions that under-specify the output format
 				-- (redundant with a compliant instruction by design).
 				local instruction = config.reviewInstruction or defaultInstruction
-				local reviewAsk = `Use the following review instruction:\n\n{instruction}\n\n---\n\nUsing this instruction, review PR {prUrl}. Based on the review feedback, determine the blocking issues and the non-blocking issues.`
+				local reviewAsk =
+					`Use the following review instruction:\n\n{instruction}\n\n---\n\nUsing this instruction, review PR {prUrl}. Based on the review feedback, determine the blocking issues and the non-blocking issues.`
 				local outcome = session:prompt(header .. reviewAsk)
 				if
 					predicate("The review verdict does not contain blocking issues", outcome.text, {

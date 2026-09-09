@@ -121,11 +121,13 @@ function M.new(config: Config): Instance
 			local accepted: string
 			if scope ~= nil then
 				ptah.log(`openspec: implementing change {change} (task scope: {scope})`)
-				prompt = `Implement the pending tasks of the openspec change named {change} using the openspec-apply-change skill. The task scope for this run is: {scope}. Treat the tasks matching the scope as the entire job: implement those, leave all other tasks pending, and end each pass either with the scoped tasks implemented or paused with a stated reason, as the skill defines those states. If the task scope matches no tasks, end the pass stating that; do not guess or substitute.`
+				prompt =
+					`Implement the pending tasks of the openspec change named {change} using the openspec-apply-change skill. The task scope for this run is: {scope}. Treat the tasks matching the scope as the entire job: implement those, leave all other tasks pending, and end each pass either with the scoped tasks implemented or paused with a stated reason, as the skill defines those states. If the task scope matches no tasks, end the pass stating that; do not guess or substitute.`
 				accepted = `All tasks in the following task scope are implemented: "{scope}"`
 			else
 				ptah.log(`openspec: implementing change {change}`)
-				prompt = `Implement the pending tasks of the openspec change named {change} using the openspec-apply-change skill. End each pass either with all tasks implemented or paused with a stated reason, as the skill defines those states.`
+				prompt =
+					`Implement the pending tasks of the openspec change named {change} using the openspec-apply-change skill. End each pass either with all tasks implemented or paused with a stated reason, as the skill defines those states.`
 				accepted = "All tasks of the change are implemented"
 			end
 			local text = drive("openspec-implement", prompt, {

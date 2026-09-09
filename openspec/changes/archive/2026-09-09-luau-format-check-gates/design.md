@@ -60,11 +60,16 @@ existing `nix flake check` surface.
    package.** The repo *is* ptah, so the gate validates the repo's scripts
    with the artifact we ship (`config.packages.ptah`'s `ptah` + bundled
    `mock-agent`; embedded defs come from the same commit — no skew).
-   Dev-binary behavior is already covered by `checks.ptah-tests`
-   (`PTAH_REQUIRE_REAL_LSP=1`). *Alternative rejected*: a cargo-test
-   harness gate — cargo tests already check *copies* (factory_components
-   mounts `vendor/factory-components`) and self-written scripts; the
-   in-place real-layout coverage is exactly what's missing.
+   `ptah check`'s typecheck pass PATH-discovers `luau-lsp` and exits `2`
+   when it is absent, and the release package ships no `luau-lsp` — so
+   the derivation's `nativeBuildInputs` additionally carries
+   `pkgs.luau-lsp`, the same pattern `checks.ptah-tests` uses for its
+   analyze tests. Dev-binary behavior is already covered by
+   `checks.ptah-tests` (`PTAH_REQUIRE_REAL_LSP=1`). *Alternative
+   rejected*: a cargo-test harness gate — cargo tests already check
+   *copies* (factory_components mounts `vendor/factory-components`) and
+   self-written scripts; the in-place real-layout coverage is exactly
+   what's missing.
 
 4. **HOME-based synthesized registry, not a source-tree config.** The
    sandbox source has no `.ptah/config.toml` (by the source filter's
