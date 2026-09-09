@@ -113,3 +113,7 @@ This repo uses spec-driven development (`openspec/`). Changes live in
 lifecycle instead of freelancing. `openspec/specs/` holds the synced truth.
 
 Scratch/artifact dirs `.work/`, `.pi/taskflows/`, `worktrees/` are gitignored.
+
+## Git and PR conventions
+
+- Commit messages and pull request titles follow [Conventional Commits](https://www.conventionalcommits.org/): `<type>[optional scope]: <imperative description>` (for example, `feat: add environment typings`). Use a concise subject without a trailing period; the PR title should describe the overall change.
