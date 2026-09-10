@@ -146,6 +146,13 @@
         [agents.pi]
         command = "${config.packages.ptah}/bin/mock-agent"
         args = []
+
+        # examples/ask.luau calls ptah.ask: the sandbox has no terminal,
+        # so the check's interaction resolution needs an explicit
+        # provider (this also exercises [ask] parsing in the release
+        # binary).
+        [ask]
+        provider = "stdin"
         EOF
         for script in examples/*.luau examples/*/*.luau .ptah/workflows/*/main.luau; do
           echo "ptah check: $script"

@@ -127,6 +127,27 @@ export type ExecResult = {
 	stderr: string,
 }
 
+-- Options for `ptah.ask(…)`: the question to show (required) plus
+-- optional context rendered as one indented line under the prompt.
+-- v1 has no other options (no timeout: an ask blocks until answered,
+-- aborted, or the run is cancelled).
+export type AskOptions = {
+	prompt: string,
+	details: string?,
+}
+
+-- Result of `ptah.ask(opts)`: a discriminated union — narrow on
+-- `action` (bind the result to a local first). `respond` carries the
+-- answer as received, unprocessed (one line); `abort` is a normal
+-- result the workflow handles like any other value, not an error, and
+-- carries no `text`.
+export type AskResult = {
+	action: "respond",
+	text: string,
+} | {
+	action: "abort",
+}
+
 -- Pure JSON module (`ptah.json`): turns captured command output into
 -- script data and back. `parse` raises on malformed input; JSON `null`
 -- decodes to nil. `stringify` rejects non-string table keys (arrays use
@@ -178,6 +199,7 @@ declare ptah: {
 	join: <T>(tasks: { Task<T> }) -> { Outcome<T> },
 	parallel: <T, U>(items: { T }, fn: (item: T) -> U, opts: ParallelOptions?) -> { Outcome<U> },
 	exec: (cmd: string, opts: ExecOptions?) -> ExecResult,
+	ask: (opts: AskOptions) -> AskResult,
 	json: Json,
 	sleep: (ms: number) -> (),
 	log: (msg: string) -> (),

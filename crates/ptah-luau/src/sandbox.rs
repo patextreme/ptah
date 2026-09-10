@@ -56,10 +56,14 @@ pub fn setup_lua(cfg: &RunConfig) -> mlua::Result<Lua> {
         sink: cfg.renderer.clone(),
         transport: cfg.transport.clone(),
         process_runner: cfg.process_runner.clone(),
+        interaction: cfg.interaction.clone(),
+        script_path: entry,
         invocation_dir: cfg.invocation_dir.clone(),
         tasks: Rc::new(TaskRegistry::default()),
         sessions: RefCell::new(Vec::new()),
         execs: RefCell::new(Vec::new()),
+        ask_counter: Cell::new(0),
+        ask_lock: tokio::sync::Mutex::new(()),
         env: cfg.env.clone(),
         exit_code: Cell::new(None),
     });
@@ -124,7 +128,7 @@ mod tests {
 
     use ptah_core::config::{AgentSpec, Registry};
     use ptah_core::events::SessionEvent;
-    use ptah_core::ports::{AgentTransport, EventSink};
+    use ptah_core::ports::{AgentTransport, EventSink, InteractionMode};
     use ptah_core::session::{SessionError, SessionHandle, SessionOptions};
 
     use super::*;
@@ -158,6 +162,7 @@ mod tests {
             registry: Registry::default(),
             transport: Arc::new(NoTransport),
             process_runner: None,
+            interaction: InteractionMode::Unresolved,
             shutdown: None,
             renderer: Arc::new(NullSink),
             env: env

@@ -13,7 +13,7 @@
 //! Plain `cargo test` elsewhere skips with a notice. Fully offline.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn ptah_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ptah")
@@ -60,15 +60,31 @@ impl Project {
     /// (the real luau-lsp's directory — ptah discovers the analyzer by
     /// PATH, exactly like the stub tests in check.rs).
     fn check(&self, script: &Path, path: &Path) -> (i32, String, String) {
-        let output = Command::new(ptah_bin())
-            .arg("check")
+        self.check_env(script, path, &[])
+    }
+
+    /// Like [`Project::check`] plus environment entries on the ptah
+    /// child (e.g. `PTAH_ASK=stdin` so ask scripts resolve a provider
+    /// without a terminal).
+    fn check_env(
+        &self,
+        script: &Path,
+        path: &Path,
+        envs: &[(&str, &str)],
+    ) -> (i32, String, String) {
+        let mut cmd = Command::new(ptah_bin());
+        cmd.arg("check")
             .arg(script)
             .current_dir(&self.dir)
             .env("PATH", path)
             .env("HOME", &self.dir)
             .env_remove("XDG_CONFIG_HOME")
-            .output()
-            .expect("run ptah check");
+            .env_remove("PTAH_ASK")
+            .stdin(Stdio::null());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let output = cmd.output().expect("run ptah check");
         (
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -251,6 +267,62 @@ fn real_luau_lsp_definitions_contract() {
     assert!(
         stderr.contains("Key 'load' not found in table 'Json'"),
         "diagnostic must name the Json module type, stderr:\n{stderr}"
+    );
+
+    // type-definitions "Ask options type-check" (accepting side) and
+    // "Ask result narrows on action": a strict ask script branching on
+    // the bound result analyzes clean on the respond arm.
+    let p = Project::new("ask-happy");
+    let script = p.write(
+        "--!strict\n\
+         local a = ptah.ask({ prompt = \"q\", details = \"d\" })\n\
+         if a.action == \"respond\" then\n\
+         \tprint(a.text)\n\
+         else\n\
+         \tprint(a.action)\n\
+         end\n",
+    );
+    let (code, stdout, stderr) = p.check_env(&script, lsp_dir, &[("PTAH_ASK", "stdin")]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        !stderr.contains("TypeError"),
+        "narrowed ask script must analyze clean, stderr:\n{stderr}"
+    );
+
+    // "Ask result narrows on action" (rejecting side): the abort arm
+    // has no `text` — the diagnostic names the ask result type.
+    let p = Project::new("ask-narrow");
+    let script = p.write(
+        "--!strict\n\
+         local a = ptah.ask({ prompt = \"q\" })\n\
+         if a.action == \"respond\" then\n\
+         \tprint(a.text)\n\
+         else\n\
+         \tprint(a.text)\n\
+         end\n",
+    );
+    let (code, _stdout, stderr) = p.check_env(&script, lsp_dir, &[("PTAH_ASK", "stdin")]);
+    assert_eq!(code, 1, "stderr:\n{stderr}");
+    // The analyzer narrows to the abort arm and reports the missing key
+    // on that arm's shape (`{ action: "abort" }`).
+    assert!(
+        stderr.contains("Key 'text' not found") && stderr.contains("abort"),
+        "diagnostic must name the abort arm's missing `text`, stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("text"),
+        "diagnostic must point at the `text` read, stderr:\n{stderr}"
+    );
+
+    // "Ask options type-check" (rejecting side): a call missing the
+    // required `prompt` reports a type error naming the field.
+    let p = Project::new("ask-missing-prompt");
+    let script = p.write("--!strict\n ptah.ask({ details = \"d\" })\n");
+    let (code, _stdout, stderr) = p.check_env(&script, lsp_dir, &[("PTAH_ASK", "stdin")]);
+    assert_eq!(code, 1, "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("prompt"),
+        "diagnostic must name the required field, stderr:\n{stderr}"
     );
 
     // type-definitions "Definitions model the sandbox" (os mirror):

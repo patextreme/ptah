@@ -10,7 +10,7 @@ use std::io::{BufWriter, Write};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use ptah_core::events::{PlanEntry, PlanStatus, SessionEvent};
+use ptah_core::events::{AskAction, PlanEntry, PlanStatus, SessionEvent};
 use ptah_core::ports::EventSink;
 use ptah_core::text::{LINE_BUDGET, truncate_visible};
 
@@ -88,7 +88,7 @@ struct SessionBuf {
 }
 
 struct Inner {
-    out: BufWriter<std::io::Stdout>,
+    out: BufWriter<Box<dyn Write + Send>>,
     styles: HashMap<String, String>,
     next_style: usize,
     bufs: HashMap<String, SessionBuf>,
@@ -102,10 +102,17 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(opts: RenderOptions) -> Self {
+        Self::with_writer(opts, std::io::stdout())
+    }
+
+    /// Build a renderer writing to an arbitrary sink instead of stdout
+    /// (tests, embedders). Same buffering/flush semantics: one flush per
+    /// completed line.
+    pub fn with_writer<W: Write + Send + 'static>(opts: RenderOptions, out: W) -> Self {
         Self {
             opts,
             inner: Mutex::new(Inner {
-                out: BufWriter::new(std::io::stdout()),
+                out: BufWriter::new(Box::new(out)),
                 styles: HashMap::new(),
                 next_style: 0,
                 bufs: HashMap::new(),
@@ -244,6 +251,41 @@ impl Renderer {
         let _ = inner.out.flush();
     }
 
+    /// Ask lines: required interaction — never suppressed by `--quiet`
+    /// (a suppressed prompt is a hung run), timestamped like every
+    /// rendered line, `--no-color` honored. Ask activity is attributed
+    /// through the sink label (`ask {n} {script_basename}`) and reads as
+    /// script activity, like exec lines — never as a named session.
+    fn ask_line(&self, inner: &mut Inner, msg: &str) {
+        self.ptah_line(inner, msg);
+        let _ = inner.out.flush();
+    }
+
+    /// `AskRequested`: the prompt line, an indented details line when
+    /// present, then the `> ` input cue — written without a trailing
+    /// newline and flushed (the user's own Enter terminates the visual
+    /// line; over pipes the next rendered line simply follows). The
+    /// provider first polls stdin only after this returns, so the
+    /// prompt is on screen before input is read.
+    fn ask_requested(&self, label: &str, prompt: &str, details: Option<&str>) {
+        let mut inner = self.inner.lock().unwrap();
+        self.ask_line(&mut inner, &ask_prompt_line(label, prompt));
+        if let Some(details) = details {
+            self.ask_line(&mut inner, &ask_details_line(details));
+        }
+        let _ = write!(inner.out, "> ");
+        let _ = inner.out.flush();
+    }
+
+    /// `AskResolved`: one line carrying the ask number and the action —
+    /// `respond` or `abort`, never the answer text (the terminal already
+    /// shows what was typed).
+    fn ask_resolved(&self, label: &str, action: AskAction) {
+        let mut inner = self.inner.lock().unwrap();
+        self.ask_line(&mut inner, &ask_resolved_line(label, action));
+        let _ = inner.out.flush();
+    }
+
     /// Flush buffered partial lines at turn end.
     pub fn flush_session(&self, label: &str) {
         if self.opts.quiet {
@@ -301,6 +343,25 @@ fn format_duration(d: Duration) -> String {
             tenths % 10
         )
     }
+}
+
+/// Prompt line body for one ask: the attribution label plus the
+/// prompt, whitespace-collapsed and truncated under the shared
+/// visible-char budget (the same mechanics as prompt lines).
+fn ask_prompt_line(label: &str, prompt: &str) -> String {
+    format!("{label}: {}", prompt_preview(prompt))
+}
+
+/// Details line body for one ask: an indented continuation line under
+/// the prompt, same collapse/truncate mechanics.
+fn ask_details_line(details: &str) -> String {
+    format!("  {}", prompt_preview(details))
+}
+
+/// Resolution line body: the attribution label plus the action
+/// (`respond` / `abort`) — never the answer text.
+fn ask_resolved_line(label: &str, action: AskAction) -> String {
+    format!("{label}: {}", action.as_str())
 }
 
 /// One-line form of a command: whitespace runs collapsed to single
@@ -377,6 +438,12 @@ impl EventSink for Renderer {
             // Verdicts ride the result channel to the bridge; nothing to
             // render on the terminal sink.
             SessionEvent::ResultVerdict { .. } => {}
+            // Ask lifecycle (required interaction — bypasses --quiet):
+            // the label (`ask {n} {script}`) is the attribution.
+            SessionEvent::AskRequested { prompt, details } => {
+                self.ask_requested(label, &prompt, details.as_deref());
+            }
+            SessionEvent::AskResolved { action, .. } => self.ask_resolved(label, action),
             SessionEvent::TurnEnd => self.flush_session(label),
         }
     }
@@ -488,5 +555,135 @@ mod tests {
         // 59.96s rounds up-front so seconds never display 60.0.
         assert_eq!(format_duration(Duration::from_millis(59_960)), "1m 00.0s");
         assert_eq!(format_duration(Duration::from_millis(65_000)), "1m 05.0s");
+    }
+
+    // ------------------------------------------------------------------
+    // Ask lines (ask capability / render-logging "Ask lines render
+    // under the ask label")
+    // ------------------------------------------------------------------
+
+    /// A shared buffer the renderer can write to, readable from the
+    /// test while the renderer is alive.
+    #[derive(Clone, Default)]
+    struct SharedOut(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl SharedOut {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl Write for SharedOut {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn ask_line_bodies_carry_attribution_and_action() {
+        // Prompt: label plus collapsed prompt; details: indented
+        // continuation; resolution: label plus action, never the text.
+        assert_eq!(
+            ask_prompt_line("ask 1 main.luau", "Blocked: how   to\ncontinue?"),
+            "ask 1 main.luau: Blocked: how to continue?"
+        );
+        assert_eq!(ask_details_line("probe output …"), "  probe output …");
+        assert_eq!(
+            ask_resolved_line("ask 2 main.luau", AskAction::Respond),
+            "ask 2 main.luau: respond"
+        );
+        assert_eq!(
+            ask_resolved_line("ask 3 main.luau", AskAction::Abort),
+            "ask 3 main.luau: abort"
+        );
+    }
+
+    #[test]
+    fn ask_prompt_and_details_truncate_under_the_shared_budget() {
+        let label = "ask 1 main.luau";
+        let long = "y".repeat(LINE_BUDGET + 10);
+        assert_eq!(
+            ask_prompt_line(label, &long),
+            format!("{label}: {}…", "y".repeat(LINE_BUDGET))
+        );
+        assert_eq!(
+            ask_details_line(&long),
+            format!("  {}…", "y".repeat(LINE_BUDGET))
+        );
+    }
+
+    #[test]
+    fn ask_events_render_prompt_details_cue_and_resolution() {
+        // Full event path through a real renderer over a shared buffer:
+        // prompt line, indented details line, `> ` cue without newline,
+        // resolution line with the action only — the answer text never
+        // appears in any ptah-rendered line.
+        let out = SharedOut::default();
+        let renderer = Renderer::with_writer(RenderOptions::default(), out.clone());
+        renderer.emit(
+            "ask 1 main.luau",
+            SessionEvent::AskRequested {
+                prompt: "Blocked: how to continue?".into(),
+                details: Some("probe output …".into()),
+            },
+        );
+        renderer.emit(
+            "ask 1 main.luau",
+            SessionEvent::AskResolved {
+                action: AskAction::Respond,
+                text: Some("secret answer".into()),
+            },
+        );
+        let text = out.text();
+        let stripped = crate_test_strip(&text);
+        assert!(stripped.contains("[ptah] ask 1 main.luau: Blocked: how to continue?"), "{text}");
+        assert!(stripped.contains("[ptah]   probe output …"), "{text}");
+        // The cue: no newline after it, and flushed.
+        assert!(text.ends_with("> ") || text.contains("> "), "{text}");
+        assert!(stripped.contains("[ptah] ask 1 main.luau: respond"), "{text}");
+        assert!(!stripped.contains("secret answer"), "answer must not re-echo: {text}");
+    }
+
+    #[test]
+    fn ask_lines_bypass_quiet() {
+        // `--quiet` suppresses streaming and diagnostics — asks are
+        // required interaction, gated like `script_log`, never silent.
+        let out = SharedOut::default();
+        let renderer = Renderer::with_writer(RenderOptions::quiet(), out.clone());
+        renderer.ask_requested("ask 1 main.luau", "Proceed?", None);
+        renderer.ask_resolved("ask 1 main.luau", AskAction::Abort);
+        let text = out.text();
+        assert!(text.contains("ask 1 main.luau: Proceed?"), "{text}");
+        assert!(text.contains("ask 1 main.luau: abort"), "{text}");
+    }
+
+    #[test]
+    fn ask_lines_follow_no_color() {
+        let out = SharedOut::default();
+        let renderer = Renderer::with_writer(
+            RenderOptions {
+                no_color: true,
+                ..RenderOptions::default()
+            },
+            out.clone(),
+        );
+        renderer.ask_requested("ask 1 main.luau", "Proceed?", None);
+        let text = out.text();
+        assert!(!text.contains('\u{1b}'), "no ANSI escapes: {text:?}");
+        assert!(text.contains("[ptah] ask 1 main.luau: Proceed?"), "{text}");
+    }
+
+    /// Strip the leading `yyyy-mm-dd HH:MM:SS ` timestamp from every
+    /// line (test-local; the integration suite has its own).
+    fn crate_test_strip(output: &str) -> String {
+        output
+            .lines()
+            .map(|l| if l.len() >= 20 && l.as_bytes()[19] == b' ' { &l[20..] } else { l })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

@@ -5,6 +5,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 fn ptah_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ptah")
 }
@@ -54,6 +56,26 @@ fn run_example_with_ptah_env(example: &str, agent_env: &[(&str, &str)], ptah_env
         output.status.success(),
         "{example} failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+}
+
+/// Run one example through the piped-stdin harness with an explicit
+/// `PTAH_ASK=stdin` provider and feed it one answer line — the ask
+/// examples' entry point (prompts render, answers go in over the pipe).
+/// Returns the captured stdout so callers can assert on rendered lines.
+fn run_example_piped(example: &str, agent_env: &[(&str, &str)], answer: &str) -> String {
+    let dir = project(example, agent_env);
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(example);
+    let mut run = common::PipedRun::spawn_env(&dir, &script, &[], &[("PTAH_ASK", "stdin")]);
+    run.wait_for("ask 1 ");
+    run.write_line(answer);
+    let (code, stdout, stderr) = run.finish();
+    assert!(
+        code == 0,
+        "{example} failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    stdout
 }
 
 #[test]
@@ -129,4 +151,41 @@ fn example_exec_pipeline() {
     // repo in the test sandbox): both the git path and the printf
     // fallback must carry the example.
     run_example("exec_pipeline.luau", &[]);
+}
+
+#[test]
+fn example_ask() {
+    // The ask example behind the piped-stdin harness: an explicit
+    // PTAH_ASK=stdin provider, one answer line, the mock reviewer turn
+    // replies with the prompt text (so the answer must come back in it).
+    let stdout = run_example_piped("ask.luau", &[], "naming conventions");
+    // The mock echoes the prompt text back, so the piped answer must
+    // surface in the logged reply — proof it fed the agent turn.
+    assert!(
+        stdout.contains("focusing on: naming conventions"),
+        "answer must propagate into the agent turn:\n{stdout}"
+    );
+}
+
+#[test]
+fn example_ask_prohibited_by_none_fails_the_preflight() {
+    // Design D8 item 5's negative path: the ask example under
+    // `--ask=none` fails the run pre-flight with the prohibited finding
+    // (exit 1, no spawn; the `.output()` harness needs no stdin).
+    let dir = project("ask-none", &[]);
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join("ask.luau");
+    let output = Command::new(ptah_bin())
+        .arg("run")
+        .arg("--ask=none")
+        .arg(&script)
+        .current_dir(&dir)
+        .output()
+        .expect("run ptah");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(stderr.contains("prohibited"), "{stderr}");
+    assert!(stdout.is_empty(), "nothing renders before the run: {stdout}");
 }

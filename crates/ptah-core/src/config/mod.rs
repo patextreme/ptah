@@ -83,27 +83,90 @@ fn interpolate(s: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
     out
 }
 
-/// A resolved registry: user entries merged with project-wins precedence.
+/// The known ask providers — the closed value set behind `--ask`,
+/// `PTAH_ASK`, and the registry's `[ask] provider` key (parsed once,
+/// consumed everywhere, so the three readers cannot drift).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskProviderKind {
+    /// Prompts render on stdout; answers read from stdin (works over
+    /// pipes whenever explicitly selected).
+    Stdin,
+    /// Asking prohibited outright (`ptah.ask` raises; the headless
+    /// permission posture is unaffected).
+    None,
+}
+
+impl std::str::FromStr for AskProviderKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "stdin" => Ok(Self::Stdin),
+            "none" => Ok(Self::None),
+            other => Err(format!(
+                "unknown ask provider `{other}` (accepted values: `stdin`, `none`)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for AskProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AskProviderKind::Stdin => "stdin",
+            AskProviderKind::None => "none",
+        })
+    }
+}
+
+/// The registry's first global (non-agent) section: `[ask]`. Carries a
+/// validated provider choice — nothing to interpolate and no credentials
+/// surface in v1 (the section has no settings beyond the provider name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskSection {
+    pub provider: AskProviderKind,
+}
+
+/// A resolved registry: user entries merged with project-wins precedence
+/// (per agent name, and for the `[ask]` section wholesale).
 #[derive(Debug, Default, Clone)]
 pub struct Registry {
     agents: BTreeMap<String, AgentSpec>,
+    ask: Option<AskSection>,
+}
+
+/// One parsed registry layer: its agent map plus the global `[ask]`
+/// section (either may be empty/absent). `Registry::from_layers` merges
+/// layers; parsing TOML into them is the config adapter's job.
+#[derive(Debug, Default, Clone)]
+pub struct RegistryLayer {
+    pub agents: BTreeMap<String, AgentSpec>,
+    pub ask: Option<AskSection>,
 }
 
 impl Registry {
     /// Merge already-parsed registry layers: project entries replace user
-    /// entries per agent name; other entries merge. (Parsing TOML into
-    /// layers is `config_fs`'s job.)
+    /// entries per agent name (other entries merge), and the project
+    /// `[ask]` section replaces the user's wholesale (the same rule the
+    /// per-agent-name merge follows — a section is never merged key by
+    /// key). (Parsing TOML into layers is `config_fs`'s job.)
     pub fn from_layers(
-        user: Option<BTreeMap<String, AgentSpec>>,
-        project: Option<BTreeMap<String, AgentSpec>>,
+        user: Option<RegistryLayer>,
+        project: Option<RegistryLayer>,
     ) -> Self {
+        // Wholesale section replacement: project.or(user) — extracted
+        // before the layers are consumed by the agent merge below.
+        let ask = project
+            .as_ref()
+            .and_then(|l| l.ask.clone())
+            .or_else(|| user.as_ref().and_then(|l| l.ask.clone()));
         let mut agents = BTreeMap::new();
         for layer in [user, project].into_iter().flatten() {
-            for (name, spec) in layer {
+            for (name, spec) in layer.agents {
                 agents.insert(name, spec); // project processed last: wins wholesale
             }
         }
-        Self { agents }
+        Self { agents, ask }
     }
 
     /// Resolve an agent by name, interpolating `${VAR}` from the process
@@ -130,6 +193,12 @@ impl Registry {
     /// Names of all registered agents.
     pub fn agent_names(&self) -> Vec<String> {
         self.agents.keys().cloned().collect()
+    }
+
+    /// The effective `[ask]` section (merged across layers wholesale),
+    /// when any layer defined one.
+    pub fn ask(&self) -> Option<&AskSection> {
+        self.ask.as_ref()
     }
 }
 
@@ -174,21 +243,29 @@ mod tests {
         }
     }
 
-    fn layers() -> (BTreeMap<String, AgentSpec>, BTreeMap<String, AgentSpec>) {
-        let user = BTreeMap::from([
-            (
-                "claude".to_string(),
-                spec("claude-acp-user", &["--old"], &[("MODEL", "sonnet")]),
-            ),
-            ("shared".to_string(), spec("shared-bin", &[], &[])),
-        ]);
-        let project = BTreeMap::from([
-            (
-                "claude".to_string(),
-                spec("claude-acp-project", &["--new"], &[]),
-            ),
-            ("gemini".to_string(), spec("gemini-acp", &[], &[])),
-        ]);
+    fn layers() -> (RegistryLayer, RegistryLayer) {
+        let user = RegistryLayer {
+            agents: BTreeMap::from([
+                (
+                    "claude".to_string(),
+                    spec("claude-acp-user", &["--old"], &[("MODEL", "sonnet")]),
+                ),
+                ("shared".to_string(), spec("shared-bin", &[], &[])),
+            ]),
+            ask: Some(AskSection {
+                provider: AskProviderKind::None,
+            }),
+        };
+        let project = RegistryLayer {
+            agents: BTreeMap::from([
+                (
+                    "claude".to_string(),
+                    spec("claude-acp-project", &["--new"], &[]),
+                ),
+                ("gemini".to_string(), spec("gemini-acp", &[], &[])),
+            ]),
+            ask: None,
+        };
         (user, project)
     }
 
@@ -250,5 +327,72 @@ mod tests {
         assert_eq!(out.args[0], "--key=");
         assert_eq!(out.args[1], "amidb");
         assert_eq!(out.env["M"], "opus");
+    }
+
+    // ------------------------------------------------------------------
+    // [ask] section merging (ask capability: wholesale layer rule)
+    // ------------------------------------------------------------------
+
+    fn ask_layer(
+        agents: &[(&str, &str)],
+        ask: Option<AskProviderKind>,
+    ) -> RegistryLayer {
+        RegistryLayer {
+            agents: agents
+                .iter()
+                .map(|(name, cmd)| (name.to_string(), spec(cmd, &[], &[])))
+                .collect(),
+            ask: ask.map(|provider| AskSection { provider }),
+        }
+    }
+
+    #[test]
+    fn project_ask_section_replaces_user_ask_section_wholesale() {
+        let reg = Registry::from_layers(
+            Some(ask_layer(&[], Some(AskProviderKind::None))),
+            Some(ask_layer(&[], Some(AskProviderKind::Stdin))),
+        );
+        assert_eq!(
+            reg.ask().map(|a| a.provider),
+            Some(AskProviderKind::Stdin),
+            "project section must win in its entirety"
+        );
+    }
+
+    #[test]
+    fn user_only_ask_section_applies() {
+        let reg = Registry::from_layers(
+            Some(ask_layer(&[], Some(AskProviderKind::None))),
+            Some(ask_layer(&[], None)),
+        );
+        assert_eq!(
+            reg.ask().map(|a| a.provider),
+            Some(AskProviderKind::None)
+        );
+    }
+
+    #[test]
+    fn no_ask_section_anywhere_is_none() {
+        let reg = Registry::from_layers(
+            Some(ask_layer(&[], None)),
+            Some(ask_layer(&[], None)),
+        );
+        assert!(reg.ask().is_none());
+        assert!(Registry::from_layers(None, None).ask().is_none());
+    }
+
+    #[test]
+    fn unknown_ask_provider_value_is_rejected() {
+        let err = "stdni"
+            .parse::<AskProviderKind>()
+            .expect_err("unknown value must fail");
+        assert!(err.contains("stdni"), "error must name the value: {err}");
+        assert!(
+            err.contains("stdin") && err.contains("none"),
+            "error must name accepted values: {err}"
+        );
+        for known in ["stdin", "none"] {
+            assert!(known.parse::<AskProviderKind>().is_ok(), "{known}");
+        }
     }
 }

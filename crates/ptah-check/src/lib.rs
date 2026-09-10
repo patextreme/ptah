@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use ptah_core::config::Registry;
+use ptah_core::ports::InteractionMode;
+
+use crate::lint::ParsedFile;
 
 /// One in-process finding: a real path, a 1-based position, a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +66,12 @@ pub fn summary_line(findings: &[Finding]) -> String {
 pub struct CheckConfig {
     pub script_path: PathBuf,
     pub registry: Registry,
+    /// The resolved interaction posture: with ask call sites present,
+    /// `Prohibited` and `Unresolved` are findings; with none, the
+    /// posture produces nothing. Resolved by the CLI (which owns
+    /// terminal detection); the check itself stays free of process
+    /// context.
+    pub interaction: InteractionMode,
     /// ANSI-color the in-process findings.
     pub color: bool,
 }
@@ -127,6 +136,10 @@ pub fn check(cfg: &CheckConfig) -> u8 {
         }
     }
 
+    // Interaction lint: with ask call sites present, a prohibited or
+    // unresolvable posture is a finding; with none, never.
+    findings.extend(interaction_findings(&walked.parsed, &cfg.interaction));
+
     for finding in &findings {
         eprintln!("{}", finding.render(cfg.color));
     }
@@ -159,14 +172,19 @@ pub fn check(cfg: &CheckConfig) -> u8 {
     u8::from(!findings.is_empty())
 }
 
-/// The `run` pre-flight: compile + require + agent lints over the entry
-/// and its literal require graph. No strictness enforcement, no luau-lsp,
-/// no execution. An empty result means the run may proceed; anything
-/// else fails the run (exit 1) before any agent subprocess spawns.
+/// The `run` pre-flight: compile + require + agent + interaction lints
+/// over the entry and its literal require graph. No strictness
+/// enforcement, no luau-lsp, no execution. An empty result means the
+/// run may proceed; anything else fails the run (exit 1) before any
+/// agent subprocess spawns.
 ///
 /// Reading the entry is left to `run` itself; if it fails here the
 /// findings are simply empty.
-pub fn preflight(script: &Path, registry: &Registry) -> Vec<Finding> {
+pub fn preflight(
+    script: &Path,
+    registry: &Registry,
+    interaction: &InteractionMode,
+) -> Vec<Finding> {
     let entry = std::fs::canonicalize(script).unwrap_or_else(|_| script.to_path_buf());
     let Ok(source) = std::fs::read_to_string(&entry) else {
         return Vec::new();
@@ -199,7 +217,49 @@ pub fn preflight(script: &Path, registry: &Registry) -> Vec<Finding> {
             }
         }
     }
+    findings.extend(interaction_findings(&walked.parsed, interaction));
     findings
+}
+
+/// Interaction findings for the ask call sites in the walked graph:
+/// one finding per `ptah.ask(` site when the resolved posture is
+/// `Prohibited` (the deliberate `none` contradicting the script's
+/// need) or `Unresolved` (nothing selected a provider and
+/// auto-detection could not — the CI case), none when a provider
+/// resolved or the reachable set contains no ask sites. Over-approximate
+/// by design (an ask on a never-executed branch still fails under
+/// `none`); the runtime check remains the source of truth.
+fn interaction_findings(parsed: &[ParsedFile], mode: &InteractionMode) -> Vec<Finding> {
+    match mode {
+        InteractionMode::Provider(_) => Vec::new(),
+        InteractionMode::Prohibited | InteractionMode::Unresolved => {
+            let (kind, remedy) = match mode {
+                InteractionMode::Prohibited => (
+                    "interaction is prohibited (`none`)",
+                    "allow a provider (--ask=stdin, PTAH_ASK, or [ask]) or remove the ask",
+                ),
+                // Named remedies are the contract (cli/check specs).
+                _ => (
+                    "no ask provider resolvable",
+                    "pass --ask, set PTAH_ASK, or configure [ask] (auto-detection \
+                     needs a terminal on stdin and stdout)",
+                ),
+            };
+            parsed
+                .iter()
+                .flat_map(|f| {
+                    f.asks.iter().map(|ask| Finding {
+                        path: f.path.clone(),
+                        line: ask.site.line,
+                        column: ask.site.column,
+                        message: format!(
+                            "`ptah.ask` is unusable: {kind} — {remedy}"
+                        ),
+                    })
+                })
+                .collect()
+        }
+    }
 }
 
 /// Compile each `(path, source)` with a fresh sandboxed Luau instance —

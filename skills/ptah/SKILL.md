@@ -1,6 +1,6 @@
 ---
 name: ptah
-description: Author, validate, and run Luau automation scripts for ptah — the CLI that drives ACP-speaking AI agents (Claude Code, Gemini CLI, Codex, …) headlessly from sandboxed Luau. Use this skill whenever you are writing or editing a .luau script that uses the `ptah` global (ptah.agent, session:prompt, ptah.parallel, ptah.spawn, ptah.exec, ptah.json, resultSchema, configOptions, setConfig), configuring the agent registry (.ptah/config.toml), running or debugging `ptah run` / `ptah check` / `ptah types`, or whenever the user wants to orchestrate, fan out, pipeline, or watchdog multiple AI agents as code, or run deterministic shell steps between agent turns. Also trigger when debugging ptah script errors, exit codes, timeouts, cancels, typed results, or concurrency behavior.
+description: Author, validate, and run Luau automation scripts for ptah — the CLI that drives ACP-speaking AI agents (Claude Code, Gemini CLI, Codex, …) headlessly from sandboxed Luau. Use this skill whenever you are writing or editing a .luau script that uses the `ptah` global (ptah.agent, session:prompt, ptah.parallel, ptah.spawn, ptah.exec, ptah.ask, ptah.json, resultSchema, configOptions, setConfig), configuring the agent registry (.ptah/config.toml), running or debugging `ptah run` / `ptah check` / `ptah types`, or whenever the user wants to orchestrate, fan out, pipeline, or watchdog multiple AI agents as code, run deterministic shell steps between agent turns, or pause a run to ask a human (ptah.ask, --ask, PTAH_ASK, the [ask] registry section). Also trigger when debugging ptah script errors, exit codes, timeouts, cancels, typed results, or concurrency behavior.
 ---
 
 # ptah scripting
@@ -96,6 +96,7 @@ file.
 | `ptah.join({task, …})` | Wait for tasks → per-task outcome entries. |
 | `ptah.parallel(items, fn, { concurrency = n }?)` | Fan-out (default unlimited) → per-item outcome entries in item order. |
 | `ptah.exec(cmd, { timeoutMs = n }?)` | Run a shell command via `/bin/sh -c` → `{ exitCode, stdout, stderr }`. Any exit code is data; only could-not-run and timeout raise (process group killed first). See [Shell exec](#shell-exec-ptah-exec). |
+| `ptah.ask({ prompt =, details = })` | Pause for a human answer → `{ action = "respond", text = … }` or `{ action = "abort" }`; suspends only the calling coroutine. See [Asking a human](#asking-a-human-ptahask). |
 | `ptah.json.parse(s)` / `ptah.json.stringify(v, { indent = n }?)` | Pure JSON decode (`null` → `nil`, raises on malformed input) / encode (string keys only, arrays are 1..n). |
 | `ptah.sleep(ms)` / `ptah.log(msg)` / `ptah.exit(code)` / `ptah.version` | Helpers. `log` renders with a `[ptah]` prefix; `exit` terminates the process with code `n`. |
 
@@ -145,6 +146,14 @@ any agent subprocess spawns.)
   first allow option). Everything else an agent may ask of a client gets
   method-not-found — turns never hang. Note `AllowAlways` can persist an
   allow rule in the agent's own config beyond the run.
+- **Asking a human is a separate channel.** `ptah.ask` pauses only the
+  calling coroutine (sessions and other tasks keep running; a pending ask
+  keeps the run alive). The provider is an operator decision — `--ask` >
+  `PTAH_ASK` > project `[ask]` > user `[ask]` > auto-detect (TTY-only) —
+  and `none` prohibits asking without touching the headless permission
+  posture above. Abort is data, not an error; the four failures
+  (prohibited, no provider, provider failure, stdin EOF) raise distinct
+  errors.
 - **Timeout vs cancel.** `timeoutMs` expiry sends a cancel, then *raises*
   a Lua error. `session:cancel()` makes the prompt *return* with
   `stopReason = "cancelled"` (`text` is `""`, `result` discarded).
@@ -339,6 +348,50 @@ The session id `exec` is reserved for these lifecycle lines —
 `ptah.json.parse` / `stringify` exist for this pattern (pure, no I/O;
 `null` → `nil`; string keys only; `{ indent = n }` pretty-prints).
 
+## Asking a human (`ptah.ask`)
+
+Workflows hit blockers only a human can resolve. Raising an error unwinds
+the run and the session with it; `ptah.ask(opts)` pauses instead:
+
+```lua
+--!strict
+local answer = ptah.ask({
+	prompt = "Two candidates for the fix — which approach?",
+	details = "a) retry with backoff  b) fail over to the replica",
+})
+if answer.action == "respond" then
+	ptah.log("proceeding with: " .. answer.text)
+else -- abort: handle it like any other value
+	ptah.exit(1)
+end
+```
+
+- **Opts**: `{ prompt = <string>, details = <string>? }` — `prompt`
+  required (a usage error names it), `details` renders as one indented
+  line. No timeout option exists: an ask blocks until answered, aborted,
+  or the run is cancelled.
+- **Result**: `{ action = "respond", text = … }` (the answer line,
+  unprocessed) or `{ action = "abort" }` (no `text`). With the `stdin`
+  provider, a line of exactly `/abort` — or Ctrl-D on an empty terminal
+  prompt — aborts.
+- **Distinct raises** (all `pcall`-able): prohibited (`none` selected),
+  no provider (names `--ask`/`PTAH_ASK`/`[ask]`), provider failure, and
+  end of input (stdin EOF on a non-terminal — a piped writer closed
+  without answering).
+- **Blocking is per-coroutine**: only the caller suspends; in-flight
+  turns keep streaming and complete, sessions survive the ask (same
+  subprocess serves later prompts), and a pending ask at script end
+  keeps the run alive like an outstanding task. Concurrent asks
+  serialize FIFO, attributed `ask {n} {script}`.
+- **Provider selection is the operator's**, never the script's:
+  `--ask` flag > `PTAH_ASK` env > project `[ask]` > user `[ask]` >
+  auto-detect (stdin provider only when stdin *and* stdout are
+  terminals — in CI, set `PTAH_ASK=stdin` explicitly; it works over
+  pipes). Ctrl-C during an ask is run cancellation (exit 130/143), not
+  an abort.
+- **Ask prompts always render**, even under `--quiet` — a suppressed
+  prompt is a hung run. The answer text is never re-echoed.
+
 ## Typed results, details
 
 `resultSchema` injects one extra MCP server named `ptah` exposing a
@@ -412,6 +465,19 @@ empty); `env` merges over the inherited environment. Process-level env
 cannot vary per session — per-session model fan-out is exactly what
 `setConfig` is for.
 
+The registry's one global (non-agent) section is `[ask]`, selecting the
+`ptah.ask` provider:
+
+```toml
+[ask]
+provider = "stdin"   # or "none" to prohibit asking outright
+```
+
+`provider` is the only key; a missing key or unknown value fails
+discovery naming the file, section, and accepted values. Across layers
+the section replaces **wholesale** (project beats user in its entirety),
+and it sits *under* `--ask` and `PTAH_ASK` in the selection chain.
+
 Scripts read that same environment directly with `os.getenv(name)` (the
 only env-read surface): it observes a snapshot taken when the run starts,
 returns `nil` for unset variables (`os.getenv("X") or "fallback"` is the
@@ -427,16 +493,22 @@ nothing runs, nothing spawns. Three passes, findings collected together:
 2. **Static lints** — full-moon walk over the entry and every file
    reachable through *literal* `require("...")` strings: unknown literal
    `ptah.agent("name")` names against the discovered registry; literal
-   require targets that don't resolve; missing `--!strict`. Computed
-   names/paths are not linted.
+   require targets that don't resolve; missing `--!strict`; and unusable
+   interaction — `ptah.ask(` call sites (any argument form) with the
+   provider resolved to `none` or unresolvable off-terminal (the finding
+   names `--ask`/`PTAH_ASK`/`[ask]`; no ask sites means no finding).
+   Computed names/paths and aliased asks (`local f = ptah.ask`) are not
+   linted.
 3. **Typecheck** — `luau-lsp analyze` against the embedded definitions;
    must be on PATH or the check hard-fails (exit 2).
 
 Exit `0` clean · `1` findings (warnings like `LocalUnused` don't fail) ·
 `2` could not run. `ptah run` also pre-flights (compile + literal
-require + literal agent-name) and fails with exit 1 **before the first
-agent spawns** — a literal require on a dead code path still fails it,
-so delete dead requires.
+require + literal agent-name + interaction) and fails with exit 1
+**before the first agent spawns** — a literal require on a dead code
+path still fails it (delete dead requires), and an ask on a dead branch
+fails under `none`/unresolvable (allow a provider or remove the dead
+ask).
 
 ## Pitfall checklist
 

@@ -7,9 +7,11 @@ Defines the Luau type definitions that describe the `ptah` script API and its sa
 ## Requirements
 
 ### Requirement: Definitions cover the script API
-A definitions file SHALL declare the `ptah` global with its full public surface: `agent`, `spawn`, `parallel`, `join`, `sleep`, `log`, `exit`, and `version`; session objects (`prompt` returning a result table with `text`, `stopReason`, a `usage` table of `input`/`cacheRead`/`cacheWrite`/`output`, and `result` holding the turn's typed-result value (`nil` when there was no accepted submission), `cancel`, `label`, `close`, `configOptions`, and `setConfig`); task objects (`await`); session and task option tables; and agent spec tables. Outcome entries SHALL be typed as a discriminated union of `{ ok: true, value: T } | { ok: false, error: string }`, and `parallel`/`spawn` SHALL be generic so result types propagate. The `mcpServers` option SHALL be typed after the session-configuration structure the runtime accepts, not left untyped; the `resultSchema` session option SHALL be typed as an optional string-keyed table carrying the declared JSON Schema and the prompt-result `result` field as an optional field for the converted submission value. The `SessionOptions` type SHALL NOT declare a `config` field (the option is removed; scripts apply config with `setConfig` after session creation). The config-option surface SHALL be typed: `configOptions()` returning an array of option entries (`id`, `name`, `type`, `currentValue: string | boolean`, optional `category`, and an `options` choice array for select options) and `setConfig(id: string, value: string | boolean)`.
+A definitions file SHALL declare the `ptah` global with its full public surface: `agent`, `spawn`, `parallel`, `join`, `sleep`, `ask`, `log`, `exit`, and `version`; session objects (`prompt` returning a result table with `text`, `stopReason`, a `usage` table of `input`/`cacheRead`/`cacheWrite`/`output`, and `result` holding the turn's typed-result value (`nil` when there was no accepted submission), `cancel`, `label`, `close`, `configOptions`, and `setConfig`); task objects (`await`); session and task option tables; and agent spec tables. Outcome entries SHALL be typed as a discriminated union of `{ ok: true, value: T } | { ok: false, error: string }`, and `parallel`/`spawn` SHALL be generic so result types propagate. The `mcpServers` option SHALL be typed after the session-configuration structure the runtime accepts, not left untyped; the `resultSchema` session option SHALL be typed as an optional string-keyed table carrying the declared JSON Schema and the prompt-result `result` field as an optional field for the converted submission value. The `SessionOptions` type SHALL NOT declare a `config` field (the option is removed; scripts apply config with `setConfig` after session creation). The config-option surface SHALL be typed: `configOptions()` returning an array of option entries (`id`, `name`, `type`, `currentValue: string | boolean`, optional `category`, and an `options` choice array for select options) and `setConfig(id: string, value: string | boolean)`.
 
 The definitions SHALL additionally type `exec`: `ptah.exec(cmd: string, opts?: { timeoutMs: number? }) -> ExecResult` where `ExecResult` is `{ exitCode: number, stdout: string, stderr: string }`. The definitions SHALL additionally type the `json` module: `ptah.json.parse(s: string) -> any` (raising on malformed input) and `ptah.json.stringify(value: any, opts?: { indent: number? }) -> string`.
+
+The definitions SHALL additionally type `ask`: `ptah.ask(opts: { prompt: string, details: string? }) -> AskResult`, where `AskResult` is a discriminated union `{ action: "respond", text: string } | { action: "abort" }`.
 
 #### Scenario: Typo in result field
 - **WHEN** a script analyzed with the definitions accesses an invented field on a prompt result (e.g. `r.txt`)
@@ -42,6 +44,14 @@ The definitions SHALL additionally type `exec`: `ptah.exec(cmd: string, opts?: {
 #### Scenario: JSON module type-checks
 - **WHEN** a script analyzed with the definitions calls `ptah.json.parse(s).x` and `ptah.json.stringify(v, { indent = 2 })`
 - **THEN** both calls are accepted, and a call to an invented member (e.g. `ptah.json.load`) reports a type error
+
+#### Scenario: Ask result narrows on action
+- **WHEN** a script analyzed with the definitions binds `local a = ptah.ask({ prompt = "q" })`, branches on `a.action == "respond"`, and reads `a.text` on that branch and `a.text` on the other branch
+- **THEN** the first read is accepted and the second reports a type error (the abort arm has no `text`)
+
+#### Scenario: Ask options type-check
+- **WHEN** a strict-mode script analyzed with the definitions calls `ptah.ask({ prompt = "q", details = "d" })` and separately `ptah.ask({ details = "d" })`
+- **THEN** the first call is accepted and the missing-`prompt` call reports a type error naming the required field
 
 ### Requirement: Definitions model the sandbox
 The definitions SHALL shadow the trimmed globals the runtime provides: `os` restricted to `time`, `clock`, and `getenv` (typed `getenv: (name: string) -> string?`, returning `nil` for unset variables), `coroutine` restricted to `yield`, and `loadstring` and `collectgarbage` declared as nil.
