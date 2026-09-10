@@ -202,18 +202,42 @@ impl DependencyEntry {
 
 /// Record `alias -> entry` under `[dependencies]`, preserving every
 /// other byte of the document (user tables, comments, formatting).
-pub fn set_dependency(doc: &mut DocumentMut, alias: &str, entry: &DependencyEntry) {
-    let table = doc[DEPENDENCIES_KEY]
-        .or_insert(Item::Table(toml_edit::Table::new()))
-        .as_table_mut()
-        .expect("dependencies is a table (just inserted)");
+/// A pre-existing entry — including the inline form (`hello = { ... }`)
+/// Pesde's own CLI writes — and a top-level inline
+/// `dependencies = { ... }` are edited in place, keeping their form;
+/// an entry that is not a table at all is a manifest-edit error.
+pub fn set_dependency(
+    doc: &mut DocumentMut,
+    alias: &str,
+    entry: &DependencyEntry,
+) -> Result<(), Error> {
+    let item = doc[DEPENDENCIES_KEY].or_insert(Item::Table(toml_edit::Table::new()));
+    // New entries take their container's form: a standard table under
+    // a standard `[dependencies]` (ptah's shape), an inline table
+    // inside an inline container (a standard table cannot render
+    // inside one).
+    let inline_container = item.as_inline_table().is_some();
+    let table = item
+        .as_table_like_mut()
+        .ok_or_else(|| Error::ManifestEdit {
+            source: format!("`{DEPENDENCIES_KEY}` is not a dependency table"),
+        })?;
     // A per-alias table keeps a uniform shape even for a single field
     // (path deps) and matches Pesde's manifest conventions.
-    let field = &mut table[alias];
-    let field_table = field.or_insert(Item::Table(toml_edit::Table::new()));
-    let field_table = field_table
-        .as_table_mut()
-        .expect("dependency entry is a table (just inserted)");
+    if !table.contains_key(alias) {
+        let new_item = if inline_container {
+            Item::Value(toml_edit::Value::InlineTable(toml_edit::InlineTable::new()))
+        } else {
+            Item::Table(toml_edit::Table::new())
+        };
+        table.insert(alias, new_item);
+    }
+    let field_table = table
+        .get_mut(alias)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| Error::ManifestEdit {
+            source: format!("dependency `{alias}` is not a table"),
+        })?;
     match entry {
         DependencyEntry::Pesde {
             name,
@@ -221,26 +245,27 @@ pub fn set_dependency(doc: &mut DocumentMut, alias: &str, entry: &DependencyEntr
             target,
             index,
         } => {
-            field_table["name"] = toml_edit::value(name);
-            field_table["version"] = toml_edit::value(version);
+            field_table.insert("name", toml_edit::value(name));
+            field_table.insert("version", toml_edit::value(version));
             if let Some(target) = target {
-                field_table["target"] = toml_edit::value(target);
+                field_table.insert("target", toml_edit::value(target));
             }
             if let Some(index) = index {
-                field_table["index"] = toml_edit::value(index);
+                field_table.insert("index", toml_edit::value(index));
             }
         }
         DependencyEntry::Git { repo, rev, path } => {
-            field_table["repo"] = toml_edit::value(repo);
-            field_table["rev"] = toml_edit::value(rev);
+            field_table.insert("repo", toml_edit::value(repo));
+            field_table.insert("rev", toml_edit::value(rev));
             if let Some(path) = path {
-                field_table["path"] = toml_edit::value(path);
+                field_table.insert("path", toml_edit::value(path));
             }
         }
         DependencyEntry::Path { path } => {
-            field_table["path"] = toml_edit::value(path);
+            field_table.insert("path", toml_edit::value(path));
         }
     }
+    Ok(())
 }
 
 /// Remove the dependency with `alias` from whichever dependency table
@@ -442,7 +467,8 @@ other = "https://example.com/other"
                 target: None,
                 index: None,
             },
-        );
+        )
+        .unwrap();
         let written = doc.to_string();
         // The user's [indices] table (comments included) survives the
         // dependency edit byte-for-byte: the section from its comment
@@ -490,7 +516,8 @@ environment = "luau"
             &DependencyEntry::Path {
                 path: "/abs/pkg".into(),
             },
-        );
+        )
+        .unwrap();
         let written = doc.to_string();
         assert!(written.contains("# a user field"), "{written}");
         assert!(written.contains("keep = \"me\""), "{written}");
@@ -509,12 +536,121 @@ environment = "luau"
                 rev: "deadbeef".into(),
                 path: Some("pkg/hello".into()),
             },
-        );
+        )
+        .unwrap();
         let written = doc.to_string();
         assert!(written.contains("repo = \"https://example.com/repo\""), "{written}");
         assert!(written.contains("rev = \"deadbeef\""), "{written}");
         assert!(written.contains("path = \"pkg/hello\""), "{written}");
         toml::from_str::<Manifest>(&written).unwrap();
+    }
+
+    #[test]
+    fn re_adding_over_an_inline_entry_edits_it_in_place() {
+        // Pesde's own CLI writes inline entries (`hello = { ... }`);
+        // re-adding under the same alias (the canonical update flow)
+        // must edit the entry, keeping its inline form — not panic.
+        let mut doc = parse_manifest_doc(
+            r#"
+name = "abc/x"
+version = "0.1.0"
+
+[target]
+environment = "luau"
+
+[dependencies]
+hello = { name = "pesde/hello", version = "^0.1.0" }
+"#,
+        )
+        .unwrap();
+        set_dependency(
+            &mut doc,
+            "hello",
+            &DependencyEntry::Pesde {
+                name: "pesde/hello".into(),
+                version: "^0.2.0".into(),
+                target: None,
+                index: None,
+            },
+        )
+        .unwrap();
+        let written = doc.to_string();
+        assert!(written.contains("hello = {"), "inline form kept: {written}");
+        assert!(written.contains("^0.2.0"), "{written}");
+        assert!(!written.contains("^0.1.0"), "old version replaced: {written}");
+        toml::from_str::<Manifest>(&written).unwrap();
+    }
+
+    #[test]
+    fn a_top_level_inline_dependencies_table_is_edited_in_place() {
+        // `dependencies = { ... }` is valid Pesde-manifest TOML; new
+        // entries inside it must be inline (a standard table cannot
+        // render inside an inline table).
+        let mut doc = parse_manifest_doc(
+            r#"
+name = "abc/x"
+version = "0.1.0"
+
+[target]
+environment = "luau"
+
+dependencies = { hello = { name = "pesde/hello", version = "^0.1.0" } }
+"#,
+        )
+        .unwrap();
+        set_dependency(
+            &mut doc,
+            "util",
+            &DependencyEntry::Path {
+                path: "/abs/util".into(),
+            },
+        )
+        .unwrap();
+        set_dependency(
+            &mut doc,
+            "hello",
+            &DependencyEntry::Pesde {
+                name: "pesde/hello".into(),
+                version: "^0.3.0".into(),
+                target: None,
+                index: None,
+            },
+        )
+        .unwrap();
+        let written = doc.to_string();
+        assert!(written.contains("dependencies = {"), "inline form kept: {written}");
+        assert!(written.contains("path = \"/abs/util\""), "{written}");
+        assert!(written.contains("^0.3.0"), "{written}");
+        toml::from_str::<Manifest>(&written).unwrap();
+    }
+
+    #[test]
+    fn a_non_table_dependency_entry_is_a_manifest_edit_error() {
+        // A dependency alias bound to a non-table value cannot carry
+        // the entry's fields: a usage-class error, never a panic.
+        let mut doc = parse_manifest_doc(
+            r#"
+name = "abc/x"
+version = "0.1.0"
+
+[target]
+environment = "luau"
+
+[dependencies]
+hello = "oops"
+"#,
+        )
+        .unwrap();
+        let err = set_dependency(
+            &mut doc,
+            "hello",
+            &DependencyEntry::Path {
+                path: "/abs/pkg".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::ManifestEdit { .. }), "{err}");
+        assert!(err.is_usage(), "exit 2, not a crash: {err}");
     }
 
     #[test]

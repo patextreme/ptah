@@ -391,7 +391,7 @@ pub async fn add(
     // Surgical manifest edit.
     let text = manifest::read_manifest_text(project)?;
     let mut doc = manifest::parse_manifest_doc(&text)?;
-    manifest::set_dependency(&mut doc, alias.as_str(), &entry);
+    manifest::set_dependency(&mut doc, alias.as_str(), &entry)?;
     manifest::write_manifest_text(project, &doc.to_string())?;
 
     let install_outcome = if install_after {
