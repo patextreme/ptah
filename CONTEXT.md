@@ -58,10 +58,23 @@ in Local config, or the component's built-in default. A long or repo-pinned
 one points at a versioned document rather than inlining text.
 _Avoid_: instruction document, review instruction, prompt
 
+**Package**:
+A versioned distribution of Factory Components material (components and/or
+stdlib modules) installed by `ptah package` commands into a project. A
+package carries components; the CLI noun is package, never component.
+_Avoid_: component (that names the capability inside), dependency, bundle
+
+**Package alias**:
+The `@name` a workflow uses to require an installed package. Synced by
+`ptah package` commands into the project-root `.luaurc`, read by every
+consumer (runtime, `ptah check`, editors) with standard Luau semantics.
+_Avoid_: import, module name, package name (that is `scope/name` on the registry)
+
 **Mount point**:
 The location in a consumer repo where the Factory Components tree is made
-available (symlink, submodule, vendored copy). Library code only requires
-within its own tree, so the mount point is the consumer's free choice.
+available (symlink, submodule, vendored copy, or installed packages).
+Library code only requires within its own tree, so the mount point is the
+consumer's free choice.
 _Avoid_: vendor dir (that is one mounting mechanism, not the concept)
 
 **Source definitions**:
