@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use mlua::LuaSerdeExt;
@@ -18,8 +19,8 @@ use agent_client_protocol::schema::v1::{
 
 use ptah_core::config::AgentSpec;
 use ptah_core::error::ExitSignal;
-use ptah_core::events::SessionEvent;
-use ptah_core::ports::ExecError;
+use ptah_core::events::{AskAction, SessionEvent};
+use ptah_core::ports::{AskError, AskOutcome, AskRequest, ExecError, InteractionMode};
 use ptah_core::session::{SessionHandle, SessionOptions};
 use ptah_core::task::{self, TaskState};
 
@@ -485,6 +486,139 @@ pub(super) fn bind_ptah(lua: &Lua) -> mlua::Result<()> {
         Ok(())
     })?;
     ptah.set("sleep", sleep)?;
+
+    // ptah.ask({ prompt, details? }) — suspend the calling coroutine while
+    // a human answers (only the caller parks: other tasks, in-flight
+    // turns, and agent sessions keep progressing). Response-or-abort is
+    // data; the four failure conditions (prohibited, no provider,
+    // provider failure, end of input) raise distinct messages. The ask
+    // lock serializes concurrent asks FIFO — taken before the request
+    // event is emitted, held until the resolution is emitted, so
+    // providers (including test fakes) see exactly one ask at a time.
+    let ask = lua.create_async_function(|lua, opts: Option<Value>| async move {
+        let state = runtime_state(&lua)?;
+        let usage = |msg: String| mlua::Error::runtime(format!("ptah.ask: {msg}"));
+
+        let opts = match opts {
+            Some(Value::Table(t)) => t,
+            Some(Value::Nil) | None => {
+                return Err(usage(
+                    "expected a table argument { prompt = \"…\", details = \"…\"? }".into(),
+                ))
+            }
+            Some(other) => {
+                return Err(usage(format!(
+                    "expected a table argument {{ prompt = \"…\", details = \"…\"? }}, got {}",
+                    other.type_name()
+                )))
+            }
+        };
+        let prompt = match opts.get::<Option<Value>>("prompt")? {
+            Some(Value::String(s)) => s.to_str()?.to_string(),
+            Some(other) => {
+                return Err(usage(format!(
+                    "`prompt` must be a string, got {}",
+                    other.type_name()
+                )))
+            }
+            None => {
+                return Err(usage(
+                    "missing required `prompt` field (string)".into(),
+                ))
+            }
+        };
+        let details = match opts.get::<Option<Value>>("details")? {
+            Some(Value::String(s)) => Some(s.to_str()?.to_string()),
+            Some(Value::Nil) | None => None,
+            Some(other) => {
+                return Err(usage(format!(
+                    "`details` must be a string, got {}",
+                    other.type_name()
+                )))
+            }
+        };
+
+        let provider = match &state.interaction {
+            InteractionMode::Provider(p) => Arc::clone(p),
+            InteractionMode::Prohibited => {
+                return Err(mlua::Error::runtime(
+                    "ptah.ask: interaction is prohibited — the run resolved to the `none` \
+                     provider (--ask=none, PTAH_ASK=none, or [ask] provider = \"none\")",
+                ))
+            }
+            InteractionMode::Unresolved => {
+                return Err(mlua::Error::runtime(
+                    "ptah.ask: no ask provider configured — pass --ask, set PTAH_ASK, or \
+                     configure [ask] (auto-detection needs a terminal on stdin and stdout)",
+                ))
+            }
+        };
+
+        // Per-run attribution: `ask {n} {script_basename}`.
+        let n = state.ask_counter.get() + 1;
+        state.ask_counter.set(n);
+        let script_name = state
+            .script_path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let label = format!("ask {n} {script_name}");
+
+        // Serialize: hold the ask lock from before the request event
+        // until the resolution is emitted (or the ask is dropped).
+        let _guard = state.ask_lock.lock().await;
+        state.sink.emit(
+            &label,
+            SessionEvent::AskRequested {
+                prompt: prompt.clone(),
+                details: details.clone(),
+            },
+        );
+        let outcome = provider
+            .ask(AskRequest {
+                prompt,
+                details,
+                attribution: label.clone(),
+            })
+            .await;
+        match outcome {
+            Ok(AskOutcome::Respond { text }) => {
+                state.sink.emit(
+                    &label,
+                    SessionEvent::AskResolved {
+                        action: AskAction::Respond,
+                        text: Some(text.clone()),
+                    },
+                );
+                let result = lua.create_table()?;
+                result.set("action", "respond")?;
+                result.set("text", text)?;
+                Ok(result)
+            }
+            Ok(AskOutcome::Abort) => {
+                state.sink.emit(
+                    &label,
+                    SessionEvent::AskResolved {
+                        action: AskAction::Abort,
+                        text: None,
+                    },
+                );
+                let result = lua.create_table()?;
+                result.set("action", "abort")?;
+                Ok(result)
+            }
+            // No resolution event on failures: the ask did not resolve,
+            // it raised (only teardown or a human answer resolves).
+            Err(AskError::InputClosed) => Err(mlua::Error::runtime(
+                "ptah.ask: end of input — the ask provider's input closed with no answer \
+                 (stdin EOF on a non-terminal)",
+            )),
+            Err(AskError::Failed(msg)) => Err(mlua::Error::runtime(format!(
+                "ptah.ask: ask provider failed: {msg}"
+            ))),
+        }
+    })?;
+    ptah.set("ask", ask)?;
 
     // ptah.log(msg)
     let log = lua.create_function(|lua, msg: String| {

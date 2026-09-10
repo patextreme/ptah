@@ -543,6 +543,7 @@ fn run_script(name: &str, body: &str) -> ptah::script::RunOutcome {
         registry: ptah::config_fs::from_parts(None, None).unwrap(),
         transport: std::sync::Arc::new(ptah::acp::Transport::new()),
         process_runner: None, // exec is not under test here
+        interaction: ptah_core::ports::InteractionMode::Unresolved,
         shutdown: None,
         renderer: Arc::new(Renderer::new(RenderOptions::quiet())),
         env: std::collections::BTreeMap::new(),

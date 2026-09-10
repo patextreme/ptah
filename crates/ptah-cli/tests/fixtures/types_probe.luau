@@ -187,6 +187,20 @@ assert(encoded == '[\n  {\n    "n": 1\n  }\n]', "json stringify: " .. encoded)
 local nonzero = ptah.exec("sh -c 'exit 4'")
 assert(nonzero.exitCode == 4, "nonzero exit is data: " .. tostring(nonzero.exitCode))
 
+-- ptah.ask (ask capability): suspend only the calling coroutine until
+-- the human answers. tests/types.rs runs this probe with PTAH_ASK=stdin
+-- and pipes answers in: first ask answered `go` (the respond arm,
+-- carrying the text), second ask answered `/abort` (the abort arm,
+-- carrying no text). The attribution label is `ask {n} {script}`.
+local a = ptah.ask({ prompt = "Proceed with the probe?", details = "typed ask" })
+if a.action == "respond" then
+	assert(a.text == "go", "ask text: " .. a.text)
+else
+	error("first ask must be answered, not aborted", 0)
+end
+local b = ptah.ask({ prompt = "Abort this one?" })
+assert(b.action == "abort", "second ask must abort: " .. b.action)
+
 -- os.getenv (environment reads): the startup snapshot — set, unset,
 -- and set-to-empty are distinguishable (PTAH_ENV_* set by tests/types.rs).
 assert(os.getenv("PTAH_ENV_PROBE") == "x", "env probe: " .. tostring(os.getenv("PTAH_ENV_PROBE")))

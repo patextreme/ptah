@@ -41,11 +41,23 @@ pub(crate) struct AgentCall {
     pub name: String,
 }
 
+/// A `ptah.ask(...)` call found while walking — any argument form; the
+/// call site itself is the capability signal (unlike agent names, no
+/// literal restriction applies). Alias-indirected asks
+/// (`local f = ptah.ask`) are not calls and are not collected (a
+/// documented residual; the runtime check is the source of truth).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AskCall {
+    pub site: CallSite,
+}
+
 /// Facts about one successfully parsed file in the require graph.
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedFile {
     pub path: PathBuf,
     pub agents: Vec<AgentCall>,
+    /// `ptah.ask(` call sites in this file (any argument form).
+    pub asks: Vec<AskCall>,
     /// The file begins with a `--!strict` hot-comment.
     pub strict: bool,
 }
@@ -177,6 +189,7 @@ pub(crate) fn walk(entry: &Path) -> WalkResult {
         result.parsed.push(ParsedFile {
             path,
             agents: collector.agents,
+            asks: collector.asks,
             strict: collector.strict,
         });
     }
@@ -255,6 +268,7 @@ fn site(pos: Position) -> CallSite {
 struct Collector {
     requires: Vec<RequireCall>,
     agents: Vec<AgentCall>,
+    asks: Vec<AskCall>,
     /// Byte offset of the first non-trivia token seen (the hot-comment
     /// region ends there, matching how Luau and luau-lsp read hot
     /// comments). Full-moon visits a token reference's inner token
@@ -299,6 +313,20 @@ impl Visitor for Collector {
             self.agents.push(AgentCall {
                 site: site(prefix.token().start_position()),
                 name: agent_name,
+            });
+        }
+
+        // ptah.ask(...) — any argument form (table, string, computed,
+        // none): the call itself is the interaction signal. Same shape
+        // as the agent branch minus the literal restriction.
+        if name == "ptah"
+            && suffixes.len() == 2
+            && let Suffix::Index(Index::Dot { name: member, .. }) = suffixes[0]
+            && member.token().to_string() == "ask"
+            && matches!(suffixes[1], Suffix::Call(Call::AnonymousCall(_)))
+        {
+            self.asks.push(AskCall {
+                site: site(prefix.token().start_position()),
             });
         }
     }
@@ -395,6 +423,46 @@ mod tests {
         assert_eq!(main.agents.len(), 1);
         assert_eq!(main.agents[0].name, "claude");
         assert_eq!(main.agents[0].site.line, 4);
+        // No ask calls in this fixture.
+        assert!(main.asks.is_empty());
+    }
+
+    #[test]
+    fn collects_ask_calls_any_argument_form_and_ignores_others() {
+        let dir = tmp_project("ask-collect");
+        let entry = write(
+            &dir,
+            "main.luau",
+            "--!strict\n\
+             local a = ptah.ask({ prompt = \"q\" })\n\
+             local b = ptah.ask(\"computed \" .. \"arg\")\n\
+             local c = ptah.ask()\n\
+             local d = ptah.ask { prompt = \"table-call form\" }\n\
+             local e = ptah.other({ prompt = \"q\" })\n\
+             local ask = ptah.ask\n\
+             local f = ask({ prompt = \"aliased\" })\n\
+             -- ptah.ask({ prompt = \"commented\" })\n\
+             local g = ptah.askx({ prompt = \"prefix collision\" })\n\
+             print(a, b, c, d, e, f, g, ask)\n",
+        );
+        let walked = walk(&entry);
+        assert_eq!(walked.parsed.len(), 1);
+        let main = &walked.parsed[0];
+        // Four collected: literal table, computed string argument, no
+        // args, and the table-call form — any argument form counts,
+        // the call itself is the signal.
+        assert_eq!(main.asks.len(), 4, "{:?}", main.asks);
+        assert_eq!(main.asks[0].site.line, 2);
+        // Not collected: `ptah.other`, the aliased indirect call (a
+        // documented residual), commented-out code, and the
+        // `ptah.askx` prefix collision.
+        for line in [6, 7, 8, 9] {
+            assert!(
+                !main.asks.iter().any(|a| a.site.line == line),
+                "line {line} must not be collected: {:?}",
+                main.asks
+            );
+        }
     }
 
     #[test]

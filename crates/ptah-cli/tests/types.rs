@@ -6,11 +6,8 @@
 //! `ptah-analyze` check; `ptah types` output sync lives in cli.rs.)
 
 use std::path::PathBuf;
-use std::process::Command;
 
-fn ptah_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ptah")
-}
+mod common;
 
 fn mock_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mock-agent")
@@ -63,20 +60,31 @@ MOCK_CONFIG_ECHO = "model"
     let script_path = dir.join("main.luau");
     std::fs::write(&script_path, script).unwrap();
 
-    let output = Command::new(ptah_bin())
-        .arg("run")
-        .arg(&script_path)
-        .current_dir(&dir)
-        // PTAH_ENV_* exercise os.getenv's snapshot inside the probe:
-        // set, unset (absent from this Command), and set-to-empty.
-        .env("PTAH_ENV_PROBE", "x")
-        .env("PTAH_ENV_EMPTY", "")
-        .output()
-        .expect("run ptah");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
+    // The probe asks twice (ptah.ask coverage): drive the real stdin
+    // provider over a pipe — the explicit PTAH_ASK makes it legal without
+    // a terminal — answering `go` then `/abort`, exactly the two result
+    // arms the fixture asserts. If `ask` disappeared from the runtime the
+    // `ptah.ask` call fails the probe; if it disappeared from the defs,
+    // the nix ptah-analyze gate fails instead. PTAH_ENV_* exercise
+    // os.getenv's snapshot inside the probe: set, unset (absent here),
+    // and set-to-empty.
+    let mut run = common::PipedRun::spawn_env(
+        &dir,
+        &script_path,
+        &[],
+        &[
+            ("PTAH_ASK", "stdin"),
+            ("PTAH_ENV_PROBE", "x"),
+            ("PTAH_ENV_EMPTY", ""),
+        ],
+    );
+    run.wait_for("ask 1 main.luau: Proceed with the probe?");
+    run.write_line("go");
+    run.wait_for("ask 2 main.luau: Abort this one?");
+    run.write_line("/abort");
+    let (code, stdout, stderr) = run.finish();
+    assert_eq!(
+        code, 0,
         "type-definitions probe failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(stdout.contains("probe complete"), "{stdout}");

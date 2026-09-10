@@ -28,6 +28,7 @@ pub use ptah_core::task;
 /// Compat re-export: the version string lives in `ptah-core`.
 pub use ptah_core::VERSION;
 
+pub mod ask;
 pub mod bridge;
 pub mod cli;
 pub mod exec;

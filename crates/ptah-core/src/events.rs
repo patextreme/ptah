@@ -48,8 +48,44 @@ pub enum SessionEvent {
     /// structurally valid submission that arrived with no turn in flight
     /// (dropped, not an error).
     ResultVerdict { accepted: bool, late: bool },
+    /// A `ptah.ask` was issued to the human: the prompt and optional
+    /// details, attributed through the sink label (`ask {n} {script}`).
+    /// Ask events are required interaction: sinks render them even in
+    /// quiet modes (a suppressed prompt is a hung run).
+    AskRequested {
+        prompt: String,
+        details: Option<String>,
+    },
+    /// A `ptah.ask` resolved: the action taken and, for `respond`, the
+    /// full answer text (for downstream sinks; the terminal renderer
+    /// never re-echoes it). Emitted only for resolutions — an ask
+    /// dropped by run teardown emits no resolution.
+    AskResolved {
+        action: AskAction,
+        text: Option<String>,
+    },
     /// The turn's stream ended: flush any partial line buffers.
     TurnEnd,
+}
+
+/// How one ask resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskAction {
+    /// The human answered (the text rides [`SessionEvent::AskResolved`]).
+    Respond,
+    /// The human chose the provider's abort gesture.
+    Abort,
+}
+
+impl AskAction {
+    /// The wire name (`"respond"` / `"abort"`) — also the result table's
+    /// `action` value in scripts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AskAction::Respond => "respond",
+            AskAction::Abort => "abort",
+        }
+    }
 }
 
 /// One folded tool-call line: the fully formatted body plus the

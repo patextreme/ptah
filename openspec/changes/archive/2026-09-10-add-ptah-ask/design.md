@@ -156,7 +156,10 @@ pair; `Registry` carries `ask: Option<AskSection>`; `from_layers` applies
 per-agent-name rule. `AgentSpec`/interpolation/`resolve` are untouched (the
 section holds a validated enum, nothing to interpolate; credentials-in-file
 is structurally impossible in v1 because there is nothing to configure
-beyond the provider name).
+beyond the provider name). Validation errors label the offending
+**layer** (`user`/`project`), not the file path — the established
+`ConfigError` granularity shared by every other config error; with
+exactly two possible files the layer is equally diagnostic.
 
 ### D6 — The ask lint mirrors the agent-name lint, with the call site as the signal
 

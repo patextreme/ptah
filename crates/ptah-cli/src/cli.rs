@@ -2,13 +2,24 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::str::FromStr as _;
+use std::sync::Arc;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
+use crate::ask::{StdinAskProvider, stdin_is_tty, stdout_is_tty};
 use crate::render::{RenderOptions, Renderer};
 use crate::script::{self, RunConfig};
-use ptah_core::ports::ConfigSource;
+use ptah_core::config::AskProviderKind;
+use ptah_core::ports::{ConfigSource, InteractionMode};
+
+/// clap value parser over [`AskProviderKind`] — unknown values are
+/// usage errors (exit 2) naming the accepted set (the same string
+/// `PTAH_ASK` and `[ask] provider` parse through).
+fn parse_ask_provider(value: &str) -> Result<AskProviderKind, String> {
+    AskProviderKind::from_str(value)
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -27,7 +38,8 @@ enum Command {
     Run {
         /// Path to the entry Luau script.
         script: PathBuf,
-        /// Suppress all streaming render and diagnostics.
+        /// Suppress all streaming render and diagnostics (ask prompts
+        /// still render: they are required interaction, not noise).
         #[arg(long)]
         quiet: bool,
         /// Show runtime lifecycle diagnostics (-vv also passes agent stderr through).
@@ -36,6 +48,10 @@ enum Command {
         /// Disable ANSI colors; keep text prefixes.
         #[arg(long)]
         no_color: bool,
+        /// Ask provider for ptah.ask: `stdin` or `none`. Overrides
+        /// PTAH_ASK, the registry [ask] section, and auto-detection.
+        #[arg(long, value_name = "PROVIDER", value_parser = parse_ask_provider)]
+        ask: Option<AskProviderKind>,
     },
 
     /// Verify a script without executing it.
@@ -45,6 +61,10 @@ enum Command {
         /// Disable ANSI coloring of findings.
         #[arg(long)]
         no_color: bool,
+        /// Ask provider the interaction lint resolves against:
+        /// `stdin` or `none`. Same precedence as `run --ask`.
+        #[arg(long, value_name = "PROVIDER", value_parser = parse_ask_provider)]
+        ask: Option<AskProviderKind>,
     },
 
     /// Print the Luau type definitions for the ptah script API.
@@ -75,6 +95,7 @@ enum Parsed {
         script: PathBuf,
         render: RenderOptions,
         verbose: u8,
+        ask: Option<AskProviderKind>,
     },
     /// `ptah types` — print definitions, exit 0, touch nothing else.
     Types,
@@ -85,7 +106,11 @@ enum Parsed {
     /// skeleton), exit 0 unless writing fails.
     Init,
     /// `ptah check` — verify a script without executing it.
-    Check { script: PathBuf, no_color: bool },
+    Check {
+        script: PathBuf,
+        no_color: bool,
+        ask: Option<AskProviderKind>,
+    },
     /// `ptah __bridge` — typed-results MCP server over stdio.
     Bridge,
 }
@@ -99,6 +124,7 @@ fn parse(args: &[String]) -> Result<Parsed, clap::Error> {
             quiet,
             verbose,
             no_color,
+            ask,
         } => Parsed::Run {
             script,
             render: RenderOptions {
@@ -108,11 +134,20 @@ fn parse(args: &[String]) -> Result<Parsed, clap::Error> {
                 agent_stderr: verbose >= 2,
             },
             verbose,
+            ask,
         },
         Command::Types => Parsed::Types,
         Command::Completions { shell } => Parsed::Completions(shell),
         Command::Init => Parsed::Init,
-        Command::Check { script, no_color } => Parsed::Check { script, no_color },
+        Command::Check {
+            script,
+            no_color,
+            ask,
+        } => Parsed::Check {
+            script,
+            no_color,
+            ask,
+        },
         Command::Bridge => Parsed::Bridge,
     })
 }
@@ -206,6 +241,18 @@ const CONFIG_SKELETON: &str = r#"# ptah agent registry (project layer).
 #
 # [agents.claude.env]
 # ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}"
+#
+# ------------------------------------------------------------------
+# Interaction ([ask] section, optional, first global section): the
+# provider ptah.ask pauses the run to ask a human. `stdin` renders
+# prompts on stdout and reads answers from stdin; `none` prohibits
+# asking outright. Selection precedence: --ask flag > PTAH_ASK env >
+# project [ask] > user [ask] > auto-detect (stdin only when both
+# stdin and stdout are terminals). With both layers defining [ask],
+# the project section wins wholesale.
+#
+# [ask]
+# provider = "stdin"
 "#;
 
 /// Next-step hints printed by `ptah init` on every run — including
@@ -327,11 +374,45 @@ fn run_init() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Resolve the run's interaction posture exactly once, under the full
+/// selection chain: `--ask` flag > `PTAH_ASK` environment > merged
+/// registry `[ask]` section > auto-detection (stdin provider only when
+/// both stdin and stdout are terminals). `Err` carries the invalid
+/// `PTAH_ASK` value message — a configuration failure the callers
+/// report with exit 2, like registry discovery failures. Unit-testable
+/// with injected layers; the provider is built here (the one place
+/// that touches the world).
+fn resolve_interaction(
+    flag: Option<AskProviderKind>,
+    env: Option<&str>,
+    section: Option<AskProviderKind>,
+    interactive: bool,
+) -> Result<InteractionMode, String> {
+    let from_env = match env {
+        None => None,
+        Some("") => None,
+        Some(raw) => Some(AskProviderKind::from_str(raw).map_err(|e| {
+            format!("invalid PTAH_ASK value: {e}")
+        })?),
+    };
+    let kind = flag.or(from_env).or(section).or_else(|| {
+        // Auto-detection: stdin only on a fully interactive terminal.
+        interactive.then_some(AskProviderKind::Stdin)
+    });
+    Ok(match kind {
+        Some(AskProviderKind::Stdin) => {
+            InteractionMode::Provider(Arc::new(StdinAskProvider::new()))
+        }
+        Some(AskProviderKind::None) => InteractionMode::Prohibited,
+        None => InteractionMode::Unresolved,
+    })
+}
+
 /// `ptah check`: compile + static lints in-process, then the luau-lsp
 /// typecheck pass with the embedded definitions. Exit `0` clean, `1`
 /// findings, `2` the check could not run (missing script, registry
-/// discovery failure, luau-lsp missing).
-fn run_check(script: PathBuf, no_color: bool) -> ExitCode {
+/// discovery failure, invalid `PTAH_ASK`, luau-lsp missing).
+fn run_check(script: PathBuf, no_color: bool, ask: Option<AskProviderKind>) -> ExitCode {
     if !script.is_file() {
         eprintln!("error: script not found: {}", script.display());
         return ExitCode::from(2);
@@ -344,9 +425,19 @@ fn run_check(script: PathBuf, no_color: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let interaction =
+        match resolve_interaction(ask, std::env::var("PTAH_ASK").ok().as_deref(), registry.ask().map(|a| a.provider), stdin_is_tty() && stdout_is_tty())
+        {
+            Ok(mode) => mode,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        };
     let code = crate::check::check(&crate::check::CheckConfig {
         script_path: script,
         registry,
+        interaction,
         color: !no_color,
     });
     ExitCode::from(code)
@@ -356,16 +447,21 @@ fn run_check(script: PathBuf, no_color: bool) -> ExitCode {
 pub fn main() -> ExitCode {
     let mut args: Vec<String> = vec!["ptah".to_string()];
     args.extend(std::env::args().skip(1));
-    let (script, render_opts, verbose) = match parse(&args) {
+    let (script, render_opts, verbose, ask) = match parse(&args) {
         Ok(Parsed::Run {
             script,
             render,
             verbose,
-        }) => (script, render, verbose),
+            ask,
+        }) => (script, render, verbose, ask),
         Ok(Parsed::Types) => return print_types(),
         Ok(Parsed::Completions(shell)) => return print_completions(shell),
         Ok(Parsed::Init) => return run_init(),
-        Ok(Parsed::Check { script, no_color }) => return run_check(script, no_color),
+        Ok(Parsed::Check {
+            script,
+            no_color,
+            ask,
+        }) => return run_check(script, no_color, ask),
         Ok(Parsed::Bridge) => return crate::bridge::run(),
         Err(e) => {
             // --help / --version are "errors" that carry their own output
@@ -411,11 +507,29 @@ pub fn main() -> ExitCode {
         }
     };
 
+    // Interaction posture: resolved once, before pre-flight and agents
+    // (an invalid PTAH_ASK is a configuration failure — exit 2, the
+    // discovery-failure class). The resolved mode feeds both consumers:
+    // the pre-flight interaction lint and the run binding.
+    let interaction = match resolve_interaction(
+        ask,
+        std::env::var("PTAH_ASK").ok().as_deref(),
+        registry.ask().map(|a| a.provider),
+        stdin_is_tty() && stdout_is_tty(),
+    ) {
+        Ok(mode) => mode,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
     // Pre-flight: fail certainly-broken scripts (uncompilable entry or
     // reachable module, unresolvable literal require, unknown literal
-    // agent name) before anything spawns. Computed forms are not
-    // linted; strictness is not enforced here (`ptah check` does that).
-    let preflight = crate::check::preflight(&script, &registry);
+    // agent name, unusable ptah.ask posture) before anything spawns.
+    // Computed forms are not linted; strictness is not enforced here
+    // (`ptah check` does that).
+    let preflight = crate::check::preflight(&script, &registry, &interaction);
     if !preflight.is_empty() {
         for finding in &preflight {
             eprintln!("{}", finding.render(!render_opts.no_color));
@@ -451,6 +565,7 @@ pub fn main() -> ExitCode {
         process_runner: Some(std::sync::Arc::new(
             crate::exec::TokioProcessRunner::with_registry(groups.clone()),
         )),
+        interaction,
         shutdown: Some(shutdown_rx),
         renderer,
         // The env snapshot behind `os.getenv`: captured once here via
@@ -491,6 +606,15 @@ pub fn main() -> ExitCode {
         eprintln!("error: unobserved task error: {err}");
     }
 
+    // End the runtime without Runtime::drop's wait for blocking tasks:
+    // tokio::io::Stdin routes reads through the blocking pool, and a
+    // cancelled ask drops only the read *future* — the pool thread sits
+    // in read(2) until the stdin writer closes. Waiting for it (drop's
+    // documented behavior) would hold a SIGINT-during-ask exit hostage
+    // on an interactive stdin that simply never closed. Everything
+    // else is already torn down inside `run` (teardown joins sessions
+    // and kills exec groups; the signal monitor is aborted above).
+    rt.shutdown_background();
     ExitCode::from(u8::try_from(outcome.code).unwrap_or(1))
 }
 
@@ -790,16 +914,63 @@ mod tests {
     #[test]
     fn check_subcommand_parses() {
         match parse(&args(&["check", "s.luau"])).unwrap() {
-            Parsed::Check { script, no_color } => {
+            Parsed::Check {
+                script, no_color, ..
+            } => {
                 assert_eq!(script, PathBuf::from("s.luau"));
                 assert!(!no_color);
             }
             _ => panic!("expected Check"),
         }
         match parse(&args(&["check", "s.luau", "--no-color"])).unwrap() {
-            Parsed::Check { no_color: true, .. } => {}
+            Parsed::Check {
+                no_color: true, ..
+            } => {}
             _ => panic!("expected Check"),
         }
+    }
+
+    #[test]
+    fn ask_flag_parses_on_run_and_check() {
+        // Both spellings, both subcommands, both v1 providers.
+        for form in [["--ask=stdin"].as_slice(), ["--ask", "stdin"].as_slice()] {
+            let argv = ["run", "s.luau"]
+                .iter()
+                .chain(form.iter())
+                .copied()
+                .collect::<Vec<_>>();
+            match parse(&args(&argv)).unwrap() {
+                Parsed::Run {
+                    ask: Some(kind), ..
+                } => assert_eq!(kind, AskProviderKind::Stdin),
+                _ => panic!("expected Run with ask"),
+            }
+        }
+        match parse(&args(&["check", "s.luau", "--ask=none"])).unwrap() {
+            Parsed::Check {
+                ask: Some(kind), ..
+            } => assert_eq!(kind, AskProviderKind::None),
+            _ => panic!("expected Check with ask"),
+        }
+        // Absent flag stays None (selection falls through the chain).
+        match parse(&args(&["run", "s.luau"])).unwrap() {
+            Parsed::Run { ask: None, .. } => {}
+            _ => panic!("expected Run without ask"),
+        }
+    }
+
+    #[test]
+    fn ask_flag_rejects_unknown_providers_with_a_usage_error() {
+        let err = parse(&args(&["run", "--ask=webhook", "s.luau"])).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        let msg = err.to_string();
+        assert!(msg.contains("webhook"), "names the value: {msg}");
+        assert!(
+            msg.contains("stdin") && msg.contains("none"),
+            "names accepted values: {msg}"
+        );
+        let err = parse(&args(&["check", "--ask=webhook", "s.luau"])).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
@@ -826,6 +997,7 @@ mod tests {
             script,
             render: opts,
             verbose: v,
+            ..
         } = parse(&args(&["run", "s.luau"])).unwrap()
         else {
             panic!("expected Run")
@@ -902,5 +1074,70 @@ mod tests {
         kill_registered_groups(&groups); // idempotent: ESRCH ignored
         groups.deregister(child.id());
         assert!(groups.snapshot().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Interaction-mode resolution (ask capability: precedence chain)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn interaction_resolution_follows_the_precedence_chain() {
+        use ptah_core::ports::InteractionMode::*;
+
+        let stdin = Some(AskProviderKind::Stdin);
+        let none = Some(AskProviderKind::None);
+
+        // No overrides anywhere: auto-detect decides.
+        assert!(matches!(
+            resolve_interaction(None, None, None, true).unwrap(),
+            Provider(_)
+        ));
+        assert!(matches!(
+            resolve_interaction(None, None, None, false).unwrap(),
+            Unresolved
+        ));
+
+        // Flag beats environment (even when they disagree).
+        assert!(matches!(
+            resolve_interaction(stdin, Some("none"), none, false).unwrap(),
+            Provider(_)
+        ));
+        assert!(matches!(
+            resolve_interaction(none, Some("stdin"), stdin, false).unwrap(),
+            Prohibited
+        ));
+
+        // Environment beats the registry section.
+        assert!(matches!(
+            resolve_interaction(None, Some("none"), stdin, false).unwrap(),
+            Prohibited
+        ));
+        assert!(matches!(
+            resolve_interaction(None, Some("stdin"), none, false).unwrap(),
+            Provider(_)
+        ));
+
+        // Section beats auto-detect; section alone applies.
+        assert!(matches!(
+            resolve_interaction(None, None, none, true).unwrap(),
+            Prohibited
+        ));
+        assert!(matches!(
+            resolve_interaction(None, None, stdin, false).unwrap(),
+            Provider(_)
+        ));
+    }
+
+    #[test]
+    fn interaction_resolution_rejects_invalid_env_value() {
+        let err = resolve_interaction(None, Some("webhook"), None, true).unwrap_err();
+        assert!(err.contains("PTAH_ASK"), "names the variable: {err}");
+        assert!(
+            err.contains("stdin") && err.contains("none"),
+            "names accepted values: {err}"
+        );
+        // Valid values and an unset/empty variable are fine.
+        assert!(resolve_interaction(None, Some("stdin"), None, false).is_ok());
+        assert!(resolve_interaction(None, Some(""), None, false).is_ok());
     }
 }

@@ -8,6 +8,7 @@ use mlua::luau::Require as _;
 use mlua::{Function, Lua, Value};
 
 use ptah::render::{RenderOptions, Renderer};
+use ptah_core::ports::InteractionMode;
 use ptah::script::{self, RunConfig, require::ScriptRequirer};
 use ptah::task::{TaskRegistry, spawn};
 
@@ -19,6 +20,7 @@ fn test_lua(script_dir: &std::path::Path) -> Lua {
         registry: ptah::config_fs::from_parts(None, None).unwrap(),
         transport: std::sync::Arc::new(ptah::acp::Transport::new()),
         process_runner: None,
+        interaction: InteractionMode::Unresolved,
         shutdown: None,
         renderer: Arc::new(Renderer::new(RenderOptions::quiet())),
         env: std::collections::BTreeMap::new(),

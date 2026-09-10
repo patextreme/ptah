@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ptah::config::Registry;
+use ptah_core::ports::InteractionMode;
 use ptah::exec::TokioProcessRunner;
 use ptah::render::{RenderOptions, Renderer};
 use ptah::script::{self, RunConfig, RunOutcome};
@@ -51,6 +52,7 @@ fn run_with_registry(
         // The CLI always injects the tokio runner; the suite runs the
         // same composition so `ptah.exec` behaves identically here.
         process_runner: Some(Arc::new(TokioProcessRunner::new())),
+        interaction: InteractionMode::Unresolved,
         shutdown: None,
         renderer: Arc::new(Renderer::new(RenderOptions::quiet())),
         env: BTreeMap::new(),

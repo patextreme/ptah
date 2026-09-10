@@ -5,25 +5,57 @@
 //! invocation directory) override user entries (`$XDG_CONFIG_HOME/ptah/`
 //! or `~/.config/ptah/config.toml`) wholesale per agent name.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ptah_core::config::{AgentSpec, ConfigError, Registry};
+use ptah_core::config::{AgentSpec, AskProviderKind, AskSection, ConfigError, Registry, RegistryLayer};
 use ptah_core::ports::ConfigSource;
+use std::collections::BTreeMap;
+use std::str::FromStr as _;
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct RegistryFile {
     #[serde(default)]
     agents: BTreeMap<String, AgentSpec>,
+    #[serde(default)]
+    ask: Option<AskFile>,
 }
 
-/// Parse one registry layer's TOML contents into its agent map.
-fn parse_layer(label: &str, contents: &str) -> Result<BTreeMap<String, AgentSpec>, ConfigError> {
+/// The raw `[ask]` section: `provider` is validated against the known
+/// value set at parse time (missing or unknown values fail discovery
+/// with an error naming the file, the section, and the accepted
+/// values), so a merged registry can never carry an unvalidated choice.
+#[derive(Debug, Default, serde::Deserialize)]
+struct AskFile {
+    provider: Option<String>,
+}
+
+/// Parse one registry layer's TOML contents into its agents and its
+/// `[ask]` section (when present, validated — see [`AskFile`]).
+fn parse_layer(label: &str, contents: &str) -> Result<RegistryLayer, ConfigError> {
     let file: RegistryFile = toml::from_str(contents).map_err(|e| ConfigError::Parse {
         label: label.into(),
         source: e.to_string(),
     })?;
-    Ok(file.agents)
+    let ask = match file.ask {
+        None => None,
+        Some(section) => {
+            let provider = section.provider.as_deref().ok_or_else(|| ConfigError::Parse {
+                label: label.into(),
+                source: "[ask] section: missing required `provider` key \
+                        (accepted values: `stdin`, `none`)"
+                    .to_string(),
+            })?;
+            let provider = AskProviderKind::from_str(provider).map_err(|source| ConfigError::Parse {
+                label: label.into(),
+                source: format!("[ask] section: {source}"),
+            })?;
+            Some(AskSection { provider })
+        }
+    };
+    Ok(RegistryLayer {
+        agents: file.agents,
+        ask,
+    })
 }
 
 /// Parse a [`Registry`] from the contents of user and project config
@@ -148,11 +180,84 @@ command = "gemini-acp"
     fn missing_files_are_ok() {
         let reg = load(None, Some(Path::new("/nonexistent/x.toml"))).unwrap();
         assert!(reg.agent_names().is_empty());
+        assert!(reg.ask().is_none());
     }
 
     #[test]
     fn parse_error_is_labeled() {
         let err = from_parts(Some("not toml {{{"), None).unwrap_err();
         assert!(err.to_string().contains("user"), "{err}");
+    }
+
+    // ------------------------------------------------------------------
+    // [ask] section parsing (agent-registry capability)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn valid_ask_section_parses() {
+        for (contents, expect) in [
+            (
+                "[ask]\nprovider = \"stdin\"\n",
+                ptah_core::config::AskProviderKind::Stdin,
+            ),
+            (
+                "[ask]\nprovider = \"none\"\n",
+                ptah_core::config::AskProviderKind::None,
+            ),
+        ] {
+            let reg = from_parts(None, Some(contents)).unwrap();
+            assert_eq!(
+                reg.ask().map(|a| a.provider),
+                Some(expect),
+                "for {contents}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_ask_provider_fails_discovery_naming_layer_section_and_values() {
+        let err = from_parts(Some("[ask]\nprovider = \"stdni\"\n"), None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("user config"), "names the layer: {msg}");
+        assert!(msg.contains("[ask]"), "names the section: {msg}");
+        assert!(
+            msg.contains("stdin") && msg.contains("none"),
+            "names accepted values: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_provider_key_fails_discovery() {
+        let err = from_parts(None, Some("[ask]\n")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("[ask]"), "{msg}");
+        assert!(msg.contains("provider"), "{msg}");
+    }
+
+    #[test]
+    fn absent_ask_section_leaves_agents_untouched() {
+        // Agents-only files parse exactly as before; no ask data.
+        let reg = from_parts(Some(USER), Some(PROJECT)).unwrap();
+        assert!(reg.ask().is_none());
+        assert_eq!(reg.agent_names().len(), 3);
+    }
+
+    #[test]
+    fn project_ask_replaces_user_ask_wholesale() {
+        let reg = from_parts(
+            Some("[ask]\nprovider = \"none\"\n"),
+            Some("[ask]\nprovider = \"stdin\"\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            reg.ask().map(|a| a.provider),
+            Some(ptah_core::config::AskProviderKind::Stdin)
+        );
+        // And user-only applies when the project defines none.
+        let reg = from_parts(Some("[ask]\nprovider = \"none\"\n"), Some(PROJECT)).unwrap();
+        assert_eq!(
+            reg.ask().map(|a| a.provider),
+            Some(ptah_core::config::AskProviderKind::None)
+        );
     }
 }

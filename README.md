@@ -48,18 +48,25 @@ cargo test             # full suite; integration tests use the mock agent only
 ## CLI
 
 ```
-ptah run <script.luau> [--quiet] [--verbose] [-vv] [--no-color]
-ptah check <script.luau> [--no-color]
+ptah run <script.luau> [--quiet] [--verbose] [-vv] [--no-color] [--ask=<provider>]
+ptah check <script.luau> [--no-color] [--ask=<provider>]
 ptah types
 ptah completions <shell>
 ptah init
 ptah --version
 ```
 
-- `--quiet` — suppress streaming render and diagnostics (script `print` still passes)
+- `--quiet` — suppress streaming render and diagnostics (script `print` still passes; ask prompts still render — they are required interaction, not noise)
 - `--verbose` — runtime lifecycle diagnostics
 - `-vv` — additionally pass agent subprocess stderr through
 - `--no-color` — drop ANSI colors, keep `[agent/session]` text prefixes
+- `--ask=<stdin|none>` — ask provider for `ptah.ask` (on `run` **and**
+  `check`): `stdin` reads answers from stdin, `none` prohibits asking.
+  The same value set is read from the `PTAH_ASK` environment variable;
+  precedence is `--ask` > `PTAH_ASK` > project `[ask]` > user `[ask]` >
+  auto-detect (the `stdin` provider only when both stdin and stdout are
+  terminals). Unknown values are usage errors (exit 2); an invalid
+  `PTAH_ASK` fails the invocation with exit 2
 - `ptah types` — print the Luau type definitions for the script API
   (see [Editor setup](#editor-setup)); needs no registry, script, or agents
 - `ptah completions <shell>` — print a shell completion script for
@@ -178,6 +185,25 @@ local codex = ptah.agent({
 })
 ```
 
+### The `[ask]` section (global)
+
+Registry files may also define `[ask]` — the registry's first global
+(non-agent) section — selecting the ask provider for `ptah.ask` (see
+[Asking a human](#asking-a-human-ptahask)):
+
+```toml
+# .ptah/config.toml (project layer)
+[ask]
+provider = "stdin"   # or "none" to prohibit asking outright
+```
+
+`provider` is the only key (validated at discovery: a missing key or an
+unknown value fails with an error naming the file, the section, and the
+accepted values). Across layers the section is replaced **wholesale** —
+the project `[ask]` beats the user `[ask]` in its entirety, exactly like
+per-agent-name replacement — and it sits under `--ask` and `PTAH_ASK` in
+the selection precedence.
+
 Any Anthropic-compatible provider works through the standard env. For
 example, running Claude Code against Z.AI's GLM models:
 
@@ -249,7 +275,9 @@ beyond the run (usually desirable for CI). When an offer contains no allow
 option at all, ptah responds with an unsupported-method error. Everything
 else agents may ask of a client — file access, terminal control,
 elicitation — is answered with a JSON-RPC method-not-found error, so turns
-never hang.
+never hang. Asking a *human* is a separate, deliberate channel —
+[`ptah.ask`](#asking-a-human-ptahask) — and its `none` posture governs
+asking only; the permission posture above is unaffected by it.
 
 ## The `ptah` namespace
 
@@ -266,6 +294,7 @@ never hang.
 | `ptah.join({task, …})` | Wait for tasks → per-task `{ok, value}` / `{ok=false, error}` entries |
 | `ptah.parallel(items, fn, {concurrency=})` | Parallel fan-out (default unlimited) → per-item outcome entries in item order |
 | `ptah.exec(cmd, {timeoutMs=})` | Run a shell command via `/bin/sh -c` → `{ exitCode, stdout, stderr }` (any exit code is data; only could-not-run and timeout raise — see below) |
+| `ptah.ask({prompt=, details=})` | Pause for a human answer → `{ action = "respond", text }` or `{ action = "abort" }` (suspends only the calling coroutine — see below) |
 | `ptah.json.parse(s)` / `ptah.json.stringify(v, {indent=})` | Pure JSON decode (`null` → `nil`, raises on malformed input) / encode (string keys only) |
 | `ptah.sleep(ms)` / `ptah.log(msg)` / `ptah.exit(code)` / `ptah.version` | Runtime helpers |
 
@@ -444,6 +473,69 @@ session-options validation with a clear error — choose another id.
  `stringify(v, { indent = n })` encodes compactly or with `n`-space
  indentation. It performs no I/O of its own.
 
+### Asking a human: `ptah.ask`
+
+Workflows hit blockers only a human can resolve — a probe that needs
+guidance mid-run, a destructive step that wants a sanity check. Raising
+an error unwinds the workflow and tears down the ACP session;
+`ptah.ask(opts)` instead **pauses** the run and asks:
+
+```lua
+--!strict
+local answer = ptah.ask({
+    prompt = "Two candidates for the fix — which approach?",
+    details = "a) retry with backoff  b) fail over to the replica",
+})
+if answer.action == "respond" then
+    ptah.log("proceeding with: " .. answer.text)
+else -- "abort": the human declined — handle it like any other value
+    ptah.exit(1)
+end
+```
+
+The contract:
+
+- **`opts` is `{ prompt = <string>, details = <string>? }`** — `prompt`
+  required (a usage error names it when missing), optional `details`
+  rendered as one indented line under the prompt. No other options in
+  v1; in particular **no timeout** — an ask blocks until answered,
+  aborted, or the run is cancelled.
+- **Response-or-abort is data**: `{ action = "respond", text = … }`
+  (the answer line, unprocessed) or `{ action = "abort" }` (no `text`).
+  With the `stdin` provider, a line of exactly `/abort` — or Ctrl-D at
+  an empty prompt on a terminal — resolves abort. Abort is a normal
+  result, not an error.
+- **Four conditions raise** catchable, distinctly-worded errors:
+  interaction prohibited (the `none` posture), no provider configured
+  (nothing resolved the ask channel — the error names `--ask`,
+  `PTAH_ASK`, and `[ask]`), provider failure, and end of input (the
+  provider's input closed with no gesture — stdin EOF on a non-terminal,
+  as when a piped writer closes without answering).
+- **Blocking is per-coroutine**: only the calling coroutine suspends —
+  other tasks, in-flight turns, and streaming keep progressing, and
+  agent sessions survive the ask (an in-flight turn completes normally;
+  the same session serves later prompts). A pending ask at script end
+  keeps the run alive exactly like an outstanding task.
+- **Concurrent asks serialize**: asks issued concurrently are delivered
+  one at a time, first-come-first-served, each attributed `ask {n}
+  {script}` (per-run number, entry script's basename) — prompts never
+  overlap.
+- **The provider is an operator decision**, never settable from script
+code: `--ask` > `PTAH_ASK` > project `[ask]` > user `[ask]` >
+  auto-detect (the `stdin` provider only when ptah's stdin **and**
+  stdout are both terminals — over a pipe or in CI you must select
+  explicitly, and the `stdin` provider works fine over pipes when you
+  do). `none` prohibits asking outright; it does not touch the headless
+  permission posture.
+- **Ctrl-C keeps its meaning**: the first SIGINT/SIGTERM during a
+  pending ask runs the normal run teardown and exits `130`/`143` — no
+  abort is delivered (abort is a human answer, cancellation is
+  process-level).
+- **Prompts always render**: ask lines (prompt, details, resolution)
+  are timestamped `[ptah]`-attributed script-activity lines that bypass
+  `--quiet` — a suppressed prompt would be a hung run. The answer text
+  is never re-echoed by ptah; the terminal already shows what was typed.
+
 ### Per-session config (models and more)
 
 Agents increasingly expose per-session configuration — above all the model
@@ -533,10 +625,16 @@ followed by a summary line (`--no-color` drops the ANSI coloring):
    reachable through literal `require("...")` string arguments:
    unknown literal `ptah.agent("name")` names against the discovered
    registry; literal require targets that don't resolve under ptah's
-   rules (`.luau`/`.lua`/`init.luau`, relative to the requiring file); and a
+   rules (`.luau`/`.lua`/`init.luau`, relative to the requiring file); a
    missing leading `--!strict` directive in the entry or any reachable
-   file. Computed require paths, computed agent names, and inline agent
-   spec tables are not linted — only literal strings.
+   file; and **unusable interaction** — `ptah.ask(` member calls (any
+   argument form) combined with a resolved provider of `none`
+   (prohibited) or no resolution at all off-terminal (the CI case): a
+   finding naming the remedies (`--ask`, `PTAH_ASK`, `[ask]`). With no
+   ask call sites, the posture produces no finding. Computed require
+   paths, computed agent names, and aliased asks
+   (`local f = ptah.ask`) are not linted — only literal shapes; the
+   runtime check is the source of truth.
 3. **Typecheck** — `luau-lsp analyze` (found on `PATH`) runs against the
    installed binary's embedded definitions; its diagnostics pass through
    verbatim. luau-lsp must be installed (`nix develop` ships it; see
@@ -549,12 +647,15 @@ run (missing/unreadable script, registry discovery failure, luau-lsp
 absent).
 
 `ptah run` also pre-flights every script in-process (compile + literal
-require + literal agent-name lints — no strictness enforcement, no
-luau-lsp) and fails the run with exit 1 before the first agent spawns.
-Scripts using computed require paths or agent names run exactly as
-before. Known trade-off: a literal require on a code path that never
-executes at runtime still fails the pre-flight — delete the dead
-require.
+require + literal agent-name + interaction lints — no strictness
+enforcement, no luau-lsp) and fails the run with exit 1 before the first
+agent spawns. The interaction lint resolves the ask provider under the
+full selection chain, so `PTAH_ASK=stdin` (or `--ask=stdin`) keeps an
+ask-using script runnable in CI. Scripts using computed require paths or
+agent names run exactly as before. Known trade-offs: a literal require on
+a code path that never executes at runtime still fails the pre-flight —
+delete the dead require; and an ask on a dead branch fails under `none` —
+allow a provider or remove the dead ask.
 
 ## Editor setup
 
@@ -640,8 +741,10 @@ identically — from the requiring file, with no directory boundary.
 See [`examples/`](examples/) — sequential review, fan-out with a concurrency
 cap, per-session model fan-out, a watchdog cancel, typed results with a
 retry loop, an exec pipeline (deterministic shell steps + JSON around one
-agent turn), and two sibling workflows sharing a helper through a
-cross-tree require — and run them against the bundled mock agent:
+agent turn), a mid-run human ask feeding an agent turn
+(`PTAH_ASK=stdin ptah run examples/ask.luau`), and two sibling workflows
+sharing a helper through a cross-tree require — and run them against the
+bundled mock agent:
 
 ```sh
 mkdir -p .ptah

@@ -114,6 +114,7 @@ fn exec_lua(runner: Option<Arc<dyn ProcessRunner>>, sink: Arc<dyn EventSink>) ->
         registry: config_fs::from_parts(None, None).unwrap(),
         transport: Arc::new(ptah::acp::Transport::new()),
         process_runner: runner,
+        interaction: ptah_core::ports::InteractionMode::Unresolved,
         shutdown: None,
         renderer: sink,
         env: std::collections::BTreeMap::new(),

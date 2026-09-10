@@ -95,11 +95,12 @@ exceptions).
 - `crates/ptah-core` — the domain, I/O-free and adapter-free: task
   bookkeeping (`ptah.spawn`/`join`/`map`), turn/tool fold semantics,
   result contracts, the config model, structured `SessionEvent`s, and
-  the ports. Exactly five funded ports (`crates/ptah-core/src/ports.rs`):
+  the ports. Exactly six funded ports (`crates/ptah-core/src/ports.rs`):
   `AgentTransport`, `ConfigSource`, `EventSink`, `InteractionPolicy`,
   `ProcessRunner` (funding `ptah.exec`, added deliberately via its own
-  change). The set is closed — a new port is a design decision that gets
-  its own change, not a drive-by.
+  change), and `AskProvider` (funding `ptah.ask`, likewise). The set is
+  closed — a new port is a design decision that gets its own change,
+  not a drive-by.
 - TUI readiness: core emits structured `SessionEvent`s through the
   `EventSink` port and all interaction flows through
   `InteractionPolicy` (today the headless allow-all policy), so a

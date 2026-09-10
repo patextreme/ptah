@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ptah_core::config::Registry;
-use ptah_core::ports::{AgentTransport, EventSink, ProcessRunner};
+use ptah_core::ports::{AgentTransport, EventSink, InteractionMode, ProcessRunner};
 use ptah_core::session::SessionHandle;
 use ptah_core::task::TaskRegistry;
 
@@ -44,12 +44,28 @@ pub(crate) struct RuntimeState {
     /// embedders that inject no capability — the binding then raises a
     /// clear runtime error instead of touching the world).
     pub(crate) process_runner: Option<Arc<dyn ProcessRunner>>,
+    /// The resolved interaction posture funding `ptah.ask`: an injected
+    /// provider, the `none` posture, or nothing resolved (both
+    /// non-provider states raise distinct errors at call time).
+    pub(crate) interaction: InteractionMode,
+    /// The entry script's path — ask attribution labels carry its
+    /// basename (`ask {n} {script}`).
+    pub(crate) script_path: PathBuf,
     pub(crate) invocation_dir: PathBuf,
     pub(crate) tasks: Rc<TaskRegistry>,
     pub(crate) sessions: RefCell<Vec<SessionHandle>>,
     /// In-flight `ptah.exec` calls, registered at start and removed at
     /// end; teardown drains this to kill live process groups.
     pub(crate) execs: RefCell<Vec<Rc<ExecEntry>>>,
+    /// Per-run ask counter (monotonic from 1) for attribution labels.
+    pub(crate) ask_counter: Cell<u64>,
+    /// Serializes concurrent `ptah.ask` calls in FIFO issue order: the
+    /// lock is taken before an ask emits anything, so every provider
+    /// (including test fakes) sees exactly one ask at a time and prompts
+    /// never interleave. Serialization lives here, in the binding, not
+    /// in the port — a future provider that could safely parallelize
+    /// would need a spec change, not just an impl.
+    pub(crate) ask_lock: tokio::sync::Mutex<()>,
     /// Snapshot of ptah's environment for `os.getenv`: captured once at
     /// the composition root and injected — the binding performs no
     /// ambient environment read.
@@ -71,6 +87,13 @@ pub struct RunConfig {
     /// `ptah.exec` raising a clear "no runner injected" error — the
     /// scripting runtime stays free of ambient subprocess powers.
     pub process_runner: Option<Arc<dyn ProcessRunner>>,
+    /// The resolved interaction posture for `ptah.ask`, resolved once at
+    /// the composition root (`--ask` > `PTAH_ASK` > project `[ask]` >
+    /// user `[ask]` > auto-detect) and injected here. `Unresolved` (the
+    /// default for embedders and tests that inject nothing) makes
+    /// `ptah.ask` raise the no-provider error at call time; `Prohibited`
+    /// raises the prohibited error.
+    pub interaction: InteractionMode,
     /// Outer cancellation for the run: fired by the embedding process
     /// when a termination signal arrives (the composition root forwards
     /// SIGINT/SIGTERM, the value carrying the exit code to report —

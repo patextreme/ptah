@@ -4,7 +4,7 @@
 //! suite.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn ptah_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ptah")
@@ -52,16 +52,37 @@ impl Project {
 
     /// Run `ptah check <script>` with `path` as the child's entire PATH.
     fn check(&self, script: &Path, path: &Path, extra: &[&str]) -> (i32, String, String) {
-        let output = Command::new(ptah_bin())
-            .arg("check")
+        self.check_env(script, path, extra, &[])
+    }
+
+    /// Like [`Project::check`], plus environment entries on the ptah
+    /// child (PTAH_ASK tests) and a non-terminal stdin (deterministic
+    /// auto-detection: the check never reads stdin, but a test run
+    /// inside a terminal must not let an inherited TTY flip the
+    /// resolution).
+    fn check_env(
+        &self,
+        script: &Path,
+        path: &Path,
+        extra: &[&str],
+        envs: &[(&str, &str)],
+    ) -> (i32, String, String) {
+        let mut cmd = Command::new(ptah_bin());
+        cmd.arg("check")
             .arg(script)
             .args(extra)
             .current_dir(&self.dir)
             .env("PATH", path)
             .env("HOME", &self.dir)
             .env_remove("XDG_CONFIG_HOME")
-            .output()
-            .expect("run ptah check");
+            .env_remove("PTAH_ASK")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let output = cmd.output().expect("run ptah check");
         (
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -438,4 +459,247 @@ fn run_preflight_lets_non_strict_scripts_through() {
     assert_eq!(code, 0, "stderr:\n{stderr}");
     assert!(stdout.contains("reply:"), "stdout:\n{stdout}");
     assert!(stdout.contains("hello"), "stdout:\n{stdout}");
+}
+
+// ---------------------------------------------------------------------
+// Interaction findings (ask capability / script-checking "Unusable
+// interaction")
+// ---------------------------------------------------------------------
+
+fn ask_script(p: &Project) -> PathBuf {
+    p.write(
+        "main.luau",
+        "--!strict\nlocal a = ptah.ask({ prompt = \"q\" })\nreturn a\n",
+    )
+}
+
+#[test]
+fn ask_with_none_posture_is_a_finding() {
+    let p = Project::new("ask-none");
+    let script = ask_script(&p);
+    let (code, _stdout, stderr) = p.check(&script, &happy_lsp(), &["--ask=none"]);
+    assert_eq!(code, 1, "stderr:\n{stderr}");
+    assert!(
+        stderr.contains(&format!("{}:2:11:", script.display())),
+        "expected a positioned finding at the call site, stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("prohibited"), "{stderr}");
+}
+
+#[test]
+fn ask_unresolvable_off_terminal_is_a_finding_naming_remedies() {
+    // No --ask / PTAH_ASK / [ask], stdin not a terminal: the resolution
+    // is Unresolved — a gap, reported with the three remedies.
+    let p = Project::new("ask-unresolvable");
+    let script = ask_script(&p);
+    let (code, _stdout, stderr) = p.check(&script, &happy_lsp(), &[]);
+    assert_eq!(code, 1, "stderr:\n{stderr}");
+    for knob in ["--ask", "PTAH_ASK", "[ask]"] {
+        assert!(stderr.contains(knob), "finding must name {knob}: {stderr}");
+    }
+}
+
+#[test]
+fn ask_with_explicit_provider_in_ci_is_clean() {
+    let p = Project::new("ask-env");
+    let script = ask_script(&p);
+    let (code, stdout, stderr) =
+        p.check_env(&script, &happy_lsp(), &[], &[("PTAH_ASK", "stdin")]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+}
+
+#[test]
+fn check_accepts_the_ask_flag() {
+    // cli spec "Check accepts the flag": --ask=stdin resolves the
+    // provider for the check — no unresolvable finding — where the
+    // same invocation without the flag would fail (no terminal here).
+    let p = Project::new("ask-flag-check");
+    let script = ask_script(&p);
+    let (code, stdout, stderr) = p.check(&script, &happy_lsp(), &["--ask=stdin"]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+}
+
+#[test]
+fn no_ask_call_sites_ignores_the_posture() {
+    // `none` + an ask-free script: no interaction finding, clean check.
+    let p = Project::new("none-no-asks");
+    let script = p.write(
+        "main.luau",
+        "--!strict\nlocal r = ptah.exec(\"true\")\nreturn r.exitCode\n",
+    );
+    let (code, stdout, stderr) = p.check(&script, &happy_lsp(), &["--ask=none"]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+}
+
+#[test]
+fn aliased_ask_is_not_collected() {
+    // `local f = ptah.ask; f(...)`: not a member call on the global —
+    // documented residual; running the script raises the prohibited
+    // error at call time (the runtime check is the source of truth).
+    let p = Project::new("ask-alias");
+    let script = p.write(
+        "main.luau",
+        "--!strict\nlocal f = ptah.ask\nreturn f({ prompt = \"q\" })\n",
+    );
+    let (code, _stdout, stderr) = p.check(&script, &happy_lsp(), &["--ask=none"]);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+}
+
+#[test]
+fn registry_ask_section_feeds_the_check_resolution() {
+    // The project registry's `[ask]` resolves the interaction posture
+    // for the check (no flag, no env) — and a bad value fails discovery
+    // (exit 2, the same class as any registry parse failure).
+    let p = Project::new("ask-registry");
+    std::fs::write(
+        p.dir.join(".ptah").join("config.toml"),
+        format!(
+            "[agents.mock]\ncommand = \"{}\"\nargs = []\n\n[ask]\nprovider = \"stdin\"\n",
+            mock_bin()
+        ),
+    )
+    .unwrap();
+    let script = ask_script(&p);
+    let (code, stdout, stderr) = p.check(&script, &happy_lsp(), &[]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    let p = Project::new("ask-registry-bad");
+    std::fs::write(
+        p.dir.join(".ptah").join("config.toml"),
+        format!(
+            "[agents.mock]\ncommand = \"{}\"\nargs = []\n\n[ask]\nprovider = \"stdni\"\n",
+            mock_bin()
+        ),
+    )
+    .unwrap();
+    let script = ask_script(&p);
+    let (code, _stdout, stderr) = p.check(&script, &happy_lsp(), &[]);
+    assert_eq!(code, 2, "stderr:\n{stderr}");
+    assert!(stderr.contains("[ask]"), "{stderr}");
+}
+
+#[test]
+fn invalid_ptah_ask_env_is_a_discovery_failure_exit_2() {
+    // CLI capability: an invalid PTAH_ASK value is a config-failure-class
+    // error (stderr + exit 2, like registry discovery failures) on both
+    // `run` and `check` — the binary-level companion to the resolution
+    // unit tests.
+    let p = Project::new("ask-bad-env");
+    let script = p.write(
+        "main.luau",
+        "--!strict\nlocal a = ptah.ask({ prompt = \"q\" })\nreturn a\n",
+    );
+
+    let output = Command::new(ptah_bin())
+        .arg("run")
+        .arg(&script)
+        .current_dir(&p.dir)
+        .env("HOME", &p.dir)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("PTAH_ASK", "bogus")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run ptah run");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(stderr.contains("PTAH_ASK"), "{stderr}");
+    assert!(
+        stderr.contains("stdin") && stderr.contains("none"),
+        "names the accepted values: {stderr}"
+    );
+
+    let (code, _stdout, stderr) =
+        p.check_env(&script, &happy_lsp(), &[], &[("PTAH_ASK", "bogus")]);
+    assert_eq!(code, 2, "stderr:\n{stderr}");
+    assert!(stderr.contains("PTAH_ASK"), "{stderr}");
+}
+
+#[test]
+fn run_preflight_ask_prohibited_fails_before_spawn() {
+    // cli spec "Ask with prohibited posture fails fast": the run
+    // pre-flight fails before any agent subprocess spawns.
+    let p = Project::new("preflight-ask-none");
+    let script = p.write(
+        "main.luau",
+        "--!strict\nlocal a = ptah.ask({ prompt = \"q\" })\nreturn a\n",
+    );
+    let output = Command::new(ptah_bin())
+        .arg("run")
+        .arg("--ask=none")
+        .arg(&script)
+        .current_dir(&p.dir)
+        .env("HOME", &p.dir)
+        .env_remove("XDG_CONFIG_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run ptah run");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(stderr.contains("prohibited"), "{stderr}");
+    assert!(stdout.is_empty(), "nothing renders before the run: {stdout}");
+}
+
+#[test]
+fn run_preflight_ask_unresolvable_off_terminal_fails_before_spawn() {
+    // cli spec "Ask unresolvable without a terminal fails fast": no
+    // --ask / PTAH_ASK / [ask] and a non-terminal stdin (and stdout —
+    // both are pipes here) — the pre-flight fails before any agent
+    // subprocess spawns, naming the selection remedies.
+    let p = Project::new("preflight-ask-unresolvable");
+    let script = p.write(
+        "main.luau",
+        "--!strict\nlocal a = ptah.ask({ prompt = \"q\" })\nreturn a\n",
+    );
+    let output = Command::new(ptah_bin())
+        .arg("run")
+        .arg(&script)
+        .current_dir(&p.dir)
+        .env("HOME", &p.dir)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("PTAH_ASK")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run ptah run");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    for knob in ["--ask", "PTAH_ASK", "[ask]"] {
+        assert!(stderr.contains(knob), "finding must name {knob}: {stderr}");
+    }
+    assert!(stdout.is_empty(), "nothing renders before the run: {stdout}");
+}
+
+#[test]
+fn run_preflight_ask_explicit_provider_in_ci_proceeds() {
+    // cli spec "Ask with explicit provider passes without a terminal":
+    // PTAH_ASK=stdin resolves; the run proceeds (and the script's ask
+    // raises end-of-input over null stdin — the runtime check being the
+    // source of truth — proving execution actually started).
+    let p = Project::new("preflight-ask-env");
+    let script = p.write(
+        "main.luau",
+        "--!strict\nlocal ok, err = pcall(ptah.ask, { prompt = \"q\" })\nassert(not ok, \"must raise over null stdin\")\nptah.log(\"ASKRAISED:\" .. tostring(err))\n",
+    );
+    let output = Command::new(ptah_bin())
+        .arg("run")
+        .arg(&script)
+        .current_dir(&p.dir)
+        .env("HOME", &p.dir)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("PTAH_ASK", "stdin")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run ptah run");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the run must execute and exit 0 (pcall contained the raise):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("end of input"),
+        "the runtime check names the real condition: {stdout}"
+    );
 }

@@ -1,8 +1,9 @@
 //! Ports and policies: the seams where adapters plug into the core.
 //!
-//! Today this module holds the [`EventSink`] port and the headless
-//! [`InteractionPolicy`]. The remaining ports (config source, agent
-//! transport) land here as the restructure proceeds.
+//! Six funded ports live here: [`AgentTransport`], [`ConfigSource`],
+//! [`EventSink`], [`InteractionPolicy`], [`ProcessRunner`] (funding
+//! `ptah.exec`), and [`AskProvider`] (funding `ptah.ask`), plus the
+//! [`InteractionMode`] the composition root resolves once per run.
 
 use std::future::Future;
 use std::path::Path;
@@ -128,6 +129,111 @@ pub trait ProcessRunner: Send + Sync {
         cmd: &'a str,
         timeout_ms: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = Result<ExecOutcome, ExecError>> + Send + 'a>>;
+}
+
+/// One question from a script to a human, everything a provider needs
+/// to deliver it. `attribution` is the per-run ask label
+/// (`ask {n} {script_basename}`) so a provider can name which run and
+/// script is asking (the renderer consumes it as the sink label).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskRequest {
+    /// The question, rendered as the prompt line.
+    pub prompt: String,
+    /// Optional context, rendered as one indented line under the prompt.
+    pub details: Option<String>,
+    /// `ask {n} {script_basename}` — which ask of which run is asking.
+    pub attribution: String,
+}
+
+/// A provider's answer: response-or-abort, never an error (abort is a
+/// normal result the workflow handles like any other value).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskOutcome {
+    /// The human answered; `text` is the answer as received, unprocessed
+    /// (v1: one line).
+    Respond { text: String },
+    /// The human chose the provider's abort gesture.
+    Abort,
+}
+
+/// Why a provider could not produce an answer. Data for the binding to
+/// raise: `InputClosed` and `Failed(String)` map to distinct, stable
+/// error messages; the provider never invents messages of its own for
+/// these two conditions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskError {
+    /// The input source closed with no gesture (stdin EOF on a
+    /// non-terminal) — the end-of-input condition, distinct from abort.
+    InputClosed,
+    /// The provider itself failed (the string names the failure).
+    Failed(String),
+}
+
+impl std::fmt::Display for AskError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AskError::InputClosed => write!(f, "ask input closed with no answer"),
+            AskError::Failed(msg) => write!(f, "ask provider failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for AskError {}
+
+/// Where human answers to `ptah.ask` come from — the sixth port. Pure
+/// data-in (one [`AskRequest`]) / data-out ([`AskOutcome`] or
+/// [`AskError`]); the concrete stdin implementation (and any future
+/// webhook/Slack/TUI provider) lives at the composition root and is
+/// injected through `RunConfig`, like [`ProcessRunner`]. Dropping the
+/// returned future before it resolves is the cancellation contract: the
+/// pending ask simply ends with the run (no abort is delivered — abort
+/// is a human answer, cancellation is process-level).
+pub trait AskProvider: Send + Sync {
+    /// Deliver one ask and resolve with the human's answer. Manually
+    /// boxed futures keep the trait object-safe, mirroring
+    /// [`AgentTransport::start_session`].
+    fn ask<'a>(
+        &'a self,
+        request: AskRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<AskOutcome, AskError>> + Send + 'a>>;
+}
+
+/// The run's interaction posture, resolved exactly once at the
+/// composition root (`--ask` > `PTAH_ASK` > project `[ask]` > user
+/// `[ask]` > auto-detect) and consumed by the `ptah.ask` binding, the
+/// run pre-flight, and `ptah check` alike. `Prohibited` is the
+/// deliberate `none` posture; `Unresolved` means nothing selected a
+/// provider and auto-detection could not (no terminal) — a
+/// configuration gap, deliberately not folded into `Prohibited` so the
+/// two error messages never lie about which problem the operator has.
+pub enum InteractionMode {
+    /// A provider resolved; asks deliver through it.
+    Provider(Arc<dyn AskProvider>),
+    /// `none` was selected: `ptah.ask` raises prohibited.
+    Prohibited,
+    /// Nothing resolved a provider and auto-detect could not apply.
+    Unresolved,
+}
+
+impl Clone for InteractionMode {
+    fn clone(&self) -> Self {
+        match self {
+            InteractionMode::Provider(p) => InteractionMode::Provider(Arc::clone(p)),
+            InteractionMode::Prohibited => InteractionMode::Prohibited,
+            InteractionMode::Unresolved => InteractionMode::Unresolved,
+        }
+    }
+}
+
+impl std::fmt::Debug for InteractionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The provider object is opaque; the variant is the diagnostic.
+        match self {
+            InteractionMode::Provider(_) => f.write_str("Provider(<injected>)"),
+            InteractionMode::Prohibited => f.write_str("Prohibited"),
+            InteractionMode::Unresolved => f.write_str("Unresolved"),
+        }
+    }
 }
 
 /// Where session events go. The session driver folds wire updates and

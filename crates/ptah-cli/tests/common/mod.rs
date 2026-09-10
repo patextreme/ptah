@@ -1,4 +1,8 @@
 //! Shared helpers for the integration test suite.
+//!
+//! Which helpers a given test binary uses varies by suite; unused ones
+//! are expected, not drift.
+#![allow(dead_code)]
 
 /// Strip the renderer's leading `yyyy-mm-dd HH:MM:SS ` timestamp from
 /// every line of captured output so assertions can target the
@@ -107,6 +111,121 @@ pub fn wait_for_processes(needle: &str, want: usize, what: &str) {
 pub fn clear_stale_tag(tag: &str) {
     kill_processes(tag);
     wait_for_processes(tag, 0, "stale tag cleared before the run");
+}
+
+/// A running `ptah` child with piped stdin (the test writes answers)
+/// and piped stdout (the test reads rendered lines) — the ask-capability
+/// binary harness. The renderer flushes per line, so line reads never
+/// miss output; the `> ` input cue carries no newline, so the line
+/// *after* it may arrive prefixed with it — substring matching stays
+/// unaffected.
+pub struct PipedRun {
+    pub child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+    transcript: Vec<String>,
+}
+
+impl PipedRun {
+    /// Spawn `ptah run <args…> <script>` in `dir` with pinned HOME and
+    /// no inherited PTAH_ASK.
+    pub fn spawn(dir: &std::path::Path, script: &std::path::Path, args: &[&str]) -> Self {
+        Self::spawn_env(dir, script, args, &[])
+    }
+
+    /// Like [`PipedRun::spawn`] plus environment entries on the child.
+    pub fn spawn_env(
+        dir: &std::path::Path,
+        script: &std::path::Path,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Self {
+        use std::process::{Command, Stdio};
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ptah"));
+        cmd.arg("run")
+            .args(args)
+            .arg(script)
+            .current_dir(dir)
+            .env("HOME", dir)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("PTAH_ASK")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().expect("spawn ptah");
+        let stdin = child.stdin.take().expect("stdin piped");
+        let stdout = std::io::BufReader::new(child.stdout.take().expect("stdout piped"));
+        Self {
+            child,
+            stdin: Some(stdin),
+            stdout,
+            transcript: Vec::new(),
+        }
+    }
+
+    /// Read lines (up to 10s) until one contains `needle`.
+    pub fn wait_for(&mut self, needle: &str) {
+        use std::io::BufRead as _;
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > std::time::Duration::from_secs(10) {
+                panic!("timed out waiting for {needle:?}; seen:\n{}", self.all_output());
+            }
+            let mut line = String::new();
+            match self.stdout.read_line(&mut line) {
+                Ok(0) => panic!(
+                    "stdout closed waiting for {needle:?}; seen:\n{}",
+                    self.all_output()
+                ),
+                Ok(_) => {
+                    let hit = line.contains(needle);
+                    self.transcript.push(line);
+                    if hit {
+                        return;
+                    }
+                }
+                Err(e) => panic!("read error waiting for {needle:?}: {e}"),
+            }
+        }
+    }
+
+    pub fn write_line(&mut self, line: &str) {
+        use std::io::Write as _;
+        let stdin = self.stdin.as_mut().expect("stdin still open");
+        stdin.write_all(line.as_bytes()).unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// Close our end: the child's stdin reads EOF.
+    pub fn close_stdin(&mut self) {
+        drop(self.stdin.take());
+    }
+
+    pub fn all_output(&self) -> String {
+        self.transcript.concat()
+    }
+
+    /// Drain the rest, reap the child: (exit code, full stdout, stderr).
+    /// The stdin handle stays open until the child is reaped — closing
+    /// it here would race a pending ask with a spurious EOF (the SIGINT
+    /// test depends on the child never seeing stdin EOF).
+    pub fn finish(&mut self) -> (i32, String, String) {
+        use std::io::Read as _;
+        let mut stderr = String::new();
+        if let Some(mut err) = self.child.stderr.take() {
+            let _ = err.read_to_string(&mut stderr);
+        }
+        let mut rest = String::new();
+        let _ = self.stdout.read_to_string(&mut rest);
+        self.transcript.push(rest);
+        let status = self.child.wait().expect("wait ptah");
+        drop(self.stdin.take());
+        (status.code().unwrap_or(-1), self.all_output(), stderr)
+    }
 }
 
 #[cfg(test)]
