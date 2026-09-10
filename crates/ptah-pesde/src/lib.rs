@@ -35,10 +35,46 @@ pub use project::PackageProject;
 /// not write — user entries survive byte-for-byte). `PTAH_DEFAULT_INDEX`
 /// overrides the compiled-in URL — the air-gapped escape hatch, and
 /// how the offline test suite points the default at a loopback
-/// fixture.
+/// fixture. A value that does not parse fails the operations that
+/// would consult the default index as a usage error
+/// ([`parse_default_index_url`]).
 pub const DEFAULT_INDEX_URL: &str = "https://github.com/pesde-pkg/index";
 
 /// Resolve the default index URL (env override > compiled-in const).
 pub fn default_index_url() -> String {
     std::env::var("PTAH_DEFAULT_INDEX").unwrap_or_else(|_| DEFAULT_INDEX_URL.to_string())
+}
+
+/// Parse a default-index URL value, mapping a malformed one to a
+/// usage-class error naming the override mechanism. The compiled-in
+/// const parses by construction, so failures in practice mean a
+/// malformed `PTAH_DEFAULT_INDEX` value — the operations that would
+/// consult the default index fail here, with a diagnostic naming the
+/// env var, before anything touches the manifest.
+pub fn parse_default_index_url(url: &str) -> Result<gix::Url, Error> {
+    gix::Url::try_from(url).map_err(|e| Error::InvalidDefaultIndex {
+        source: format!("`{url}`: {e}"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_index_url_validation_matches_gix() {
+        // The compiled-in default and a file:// override parse.
+        let url = parse_default_index_url(DEFAULT_INDEX_URL).unwrap();
+        assert!(url.to_bstring().to_string().contains("pesde-pkg/index"));
+        assert!(parse_default_index_url("file:///tmp/index").is_ok());
+
+        // A malformed override is a usage-class error (exit 2) naming
+        // the value and the env var.
+        let err = parse_default_index_url("ht tp://x").unwrap_err();
+        assert!(matches!(err, Error::InvalidDefaultIndex { .. }), "{err}");
+        assert!(err.is_usage());
+        let msg = err.to_string();
+        assert!(msg.contains("PTAH_DEFAULT_INDEX"), "{msg}");
+        assert!(msg.contains("ht tp://x"), "{msg}");
+    }
 }

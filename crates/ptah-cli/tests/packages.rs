@@ -316,3 +316,64 @@ fn no_install_edits_the_manifest_only() {
         "--no-install installs nothing"
     );
 }
+
+#[test]
+fn a_malformed_default_index_override_is_a_usage_error_not_a_panic() {
+    // A PTAH_DEFAULT_INDEX value gix rejects must fail every command
+    // that would consult the default index with a diagnostic naming
+    // the env var and exit 2 — never a panic (exit 101), and never a
+    // manifest-parse error quoting the transiently materialized
+    // [indices] table (content absent from the user's file).
+    let p = Project::new("bad-default-index");
+    let output = Command::new(ptah_bin())
+        .arg("package")
+        .args(["add", "abc/thing"])
+        .current_dir(&p.dir)
+        .env("PTAH_DEFAULT_INDEX", "ht tp://x")
+        .output()
+        .expect("run ptah package add");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "registry add must be a usage error, stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("PTAH_DEFAULT_INDEX"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(!stderr.contains("indices ="), "{stderr}");
+
+    // install/update hit the same value through the on-disk
+    // materialization path (with_default_index).
+    for args in [vec!["install"], vec!["update"]] {
+        let output = Command::new(ptah_bin())
+            .arg("package")
+            .args(&args)
+            .current_dir(&p.dir)
+            .env("PTAH_DEFAULT_INDEX", "ht tp://x")
+            .output()
+            .expect("run ptah package");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "args {args:?} must be a usage error, stderr:\n{stderr}"
+        );
+        assert!(stderr.contains("PTAH_DEFAULT_INDEX"), "{stderr}");
+        assert!(!stderr.contains("panicked"), "{stderr}");
+        assert!(!stderr.contains("indices ="), "{stderr}");
+    }
+
+    // The failures touched nothing: no lockfile, no .luaurc, and the
+    // manifest never grew an [indices] table (validation happens
+    // before the transient write too; the skeleton's *comment* may
+    // mention the table).
+    assert!(!p.dir.join(".ptah/pesde.lock").exists());
+    assert!(!p.dir.join(".luaurc").exists());
+    let manifest = std::fs::read_to_string(p.dir.join(".ptah/pesde.toml")).unwrap();
+    let active_indices = manifest
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .any(|l| l.contains("[indices]"));
+    assert!(!active_indices, "no [indices] table written: {manifest}");
+}

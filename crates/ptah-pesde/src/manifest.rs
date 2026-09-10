@@ -309,16 +309,22 @@ pub fn has_user_indices(doc: &DocumentMut) -> bool {
 /// Materialize ptah's default index into the document when (and only
 /// when) the manifest declares no `[indices]` entries: resolution
 /// against Pesde's registry needs the index reachable from the
-/// manifest text. Returns `true` when something was injected — the
-/// caller restores the original text after the operation, so the
-/// user's file never keeps a ptah-written indices table. A user table
-/// with any entry wins wholesale and is left untouched.
-pub fn materialize_default_index(doc: &mut DocumentMut) -> bool {
+/// manifest text. The URL is validated before anything is written — a
+/// malformed override (PTAH_DEFAULT_INDEX) fails as a usage error
+/// naming it here, instead of surfacing later as a manifest-parse
+/// error quoting the transiently materialized table (content that is
+/// not in the user's file). Returns `true` when something was
+/// injected — the caller restores the original text after the
+/// operation, so the user's file never keeps a ptah-written indices
+/// table. A user table with any entry wins wholesale and is left
+/// untouched.
+pub fn materialize_default_index(doc: &mut DocumentMut) -> Result<bool, Error> {
     if has_user_indices(doc) {
-        return false;
+        return Ok(false);
     }
+    crate::parse_default_index_url(&crate::default_index_url())?;
     doc["indices"]["default"] = toml_edit::value(crate::default_index_url());
-    true
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -685,7 +691,7 @@ tooling = { name = "pesde/tooling", version = "^1.0.0" }
         // No [indices] at all → injected, and the result parses with
         // the default index present.
         let mut doc = parse_manifest_doc(&skeleton("x")).unwrap();
-        assert!(materialize_default_index(&mut doc));
+        assert!(materialize_default_index(&mut doc).unwrap());
         let injected = doc.to_string();
         let parsed = toml::from_str::<Manifest>(&injected).unwrap();
         assert_eq!(
@@ -695,7 +701,7 @@ tooling = { name = "pesde/tooling", version = "^1.0.0" }
 
         // User [indices] → untouched (no injection, byte-identical).
         let mut doc = parse_manifest_doc(USER_MANIFEST).unwrap();
-        assert!(!materialize_default_index(&mut doc));
+        assert!(!materialize_default_index(&mut doc).unwrap());
         assert_eq!(doc.to_string(), USER_MANIFEST);
 
         // An empty [indices] table has no entries → injection adds the
@@ -704,7 +710,7 @@ tooling = { name = "pesde/tooling", version = "^1.0.0" }
             "name = \"abc/x\"\nversion = \"0.1.0\"\n\n[target]\nenvironment = \"luau\"\n\n[indices]\n",
         )
         .unwrap();
-        assert!(materialize_default_index(&mut doc));
+        assert!(materialize_default_index(&mut doc).unwrap());
         let parsed = toml::from_str::<Manifest>(&doc.to_string()).unwrap();
         assert_eq!(parsed.indices.len(), 1);
     }

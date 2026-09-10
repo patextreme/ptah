@@ -24,6 +24,11 @@ pub enum Error {
     ManifestEdit { source: String },
     /// The requested dependency spec or alias is not a valid form.
     InvalidSpec { source: String },
+    /// The default registry index URL (compiled-in, or overridden via
+    /// `PTAH_DEFAULT_INDEX`) does not parse as a URL. Only operations
+    /// that would consult the default index fail, before touching the
+    /// manifest.
+    InvalidDefaultIndex { source: String },
     /// `remove` was asked for an alias the manifest does not carry.
     UnknownAlias { alias: String },
 
@@ -66,6 +71,7 @@ impl Error {
                 | Error::ManifestParse { .. }
                 | Error::ManifestEdit { .. }
                 | Error::InvalidSpec { .. }
+                | Error::InvalidDefaultIndex { .. }
                 | Error::UnknownAlias { .. }
         )
     }
@@ -92,6 +98,11 @@ impl std::fmt::Display for Error {
                 write!(f, "cannot edit .ptah/pesde.toml: {source}")
             }
             Error::InvalidSpec { source } => write!(f, "invalid package specification: {source}"),
+            Error::InvalidDefaultIndex { source } => write!(
+                f,
+                "invalid default registry index URL {source} (the URL comes from \
+                 PTAH_DEFAULT_INDEX when set, else ptah's compiled-in default)"
+            ),
             Error::UnknownAlias { alias } => {
                 write!(f, "no dependency with alias `{alias}` in the manifest")
             }
@@ -172,6 +183,9 @@ mod tests {
             Error::InvalidSpec {
                 source: "bad".into(),
             },
+            Error::InvalidDefaultIndex {
+                source: "`ht tp://x`".into(),
+            },
             Error::UnknownAlias {
                 alias: "x".into(),
             },
@@ -225,5 +239,11 @@ mod tests {
         };
         assert!(e.to_string().contains("/tmp/here"), "{}", e);
         assert!(e.to_string().contains(".ptah/pesde.toml"), "{}", e);
+        let e = Error::InvalidDefaultIndex {
+            source: "`ht tp://x`".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("PTAH_DEFAULT_INDEX"), "{msg}");
+        assert!(msg.contains("ht tp://x"), "{msg}");
     }
 }

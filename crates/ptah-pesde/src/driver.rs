@@ -235,11 +235,10 @@ pub async fn add(
     let manifest = manifest::deser_manifest(project).await?;
     manifest::require_luau_target(&manifest)?;
 
-    // In-memory default-index injection: ptah's own resolve calls see
-    // the default registry without it ever reaching the manifest file.
-    let mut indices = manifest.clone();
-    inject_default_index(&mut indices);
-
+    // In-memory default-index injection happens in the registry arm
+    // below: only that source form consults the default registry, so a
+    // malformed override (PTAH_DEFAULT_INDEX) fails exactly the forms
+    // that would use it.
     let (source, specifier, default_alias) = match &request.source {
         AddSource::Registry { name, version } => {
             let name = name
@@ -250,6 +249,11 @@ pub async fn add(
                     .map_err(|e| Error::InvalidSpec { source: e.to_string() })?,
                 None => VersionReq::STAR,
             };
+            // In-memory default-index injection: ptah's own resolve
+            // call sees the default registry without it ever reaching
+            // the manifest file.
+            let mut indices = manifest.clone();
+            inject_default_index(&mut indices)?;
             let index_url = indices.indices.get(pesde::DEFAULT_INDEX_NAME).cloned();
             let index_url = match index_url {
                 Some(url) => url,
@@ -500,15 +504,18 @@ fn repo_name(url: &gix::Url) -> String {
 
 /// Inject the default index into an in-memory manifest when its
 /// indices map is empty (the in-memory view ptah resolves against; the
-/// manifest file never grows the table).
-fn inject_default_index(manifest: &mut Manifest) {
+/// manifest file never grows the table). Fails with a usage-class
+/// error when the default index URL (env override or const) does not
+/// parse — a value ptah cannot use, so retrying unchanged cannot
+/// succeed.
+fn inject_default_index(manifest: &mut Manifest) -> Result<(), Error> {
     if manifest.indices.is_empty() {
-        let url = gix_url(&crate::default_index_url())
-            .expect("default index URL (const or PTAH_DEFAULT_INDEX) parses");
+        let url = crate::parse_default_index_url(&crate::default_index_url())?;
         manifest
             .indices
             .insert(pesde::DEFAULT_INDEX_NAME.to_string(), url);
     }
+    Ok(())
 }
 
 /// Run `f` with the default index materialized into the on-disk
@@ -527,7 +534,7 @@ where
 {
     let original = manifest::read_manifest_text(project)?;
     let mut doc = manifest::parse_manifest_doc(&original)?;
-    let injected = manifest::materialize_default_index(&mut doc);
+    let injected = manifest::materialize_default_index(&mut doc)?;
     if injected {
         manifest::write_manifest_text(project, &doc.to_string())?;
     }

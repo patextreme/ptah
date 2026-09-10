@@ -829,8 +829,9 @@ their `luau_packages` entries; your own keys and aliases survive, and
 a user alias colliding with a package alias wins with a warning) —
 the same file the runtime, `ptah check`, luau-lsp, and editors read,
 so all four agree. Exit codes: `0` success, `2` usage errors (bad
-spec, no project, unparseable manifest), `1` operational failures
-(registry/network errors, missing or stale lockfile under `--locked`).
+spec, no project, unparseable manifest, malformed `PTAH_DEFAULT_INDEX`
+override), `1` operational failures (registry/network errors, missing
+or stale lockfile under `--locked`).
 
 ## Factory Components
 
