@@ -162,7 +162,7 @@ The CLI SHALL provide `ptah completions <shell>`, where `<shell>` is a required 
 
 #### Scenario: Visible subcommands appear, hidden ones do not
 - **WHEN** a completion script is generated for any shell
-- **THEN** the visible subcommands (`run`, `check`, `types`, `completions`, `init`) appear in it and the hidden `__bridge` subcommand does not
+- **THEN** the visible subcommands (`run`, `check`, `types`, `completions`, `init`, `package`) appear in it and the hidden `__bridge` subcommand does not
 
 #### Scenario: Unknown shell is a usage error
 - **WHEN** `ptah completions tcsh` is invoked
@@ -173,18 +173,19 @@ The CLI SHALL provide `ptah completions <shell>`, where `<shell>` is a required 
 - **THEN** it exits 0 without creating files or spawning agents
 
 ### Requirement: Init subcommand scaffolds a project .ptah directory
-The CLI SHALL provide `ptah init`, which scaffolds `./.ptah/` relative to the current working directory with exactly two files:
+The CLI SHALL provide `ptah init`, which scaffolds `./.ptah/` relative to the current working directory with exactly three files:
 
 - `.ptah/ptah.d.luau` — the project definitions, byte-identical to `ptah types` standard output (version header included) whenever init writes them;
-- `.ptah/config.toml` — a fully commented skeleton documenting the two-layer registry discovery (project entries override user entries per agent name), `${VAR}` environment interpolation, and the per-agent fields (`command` required, `args` and `env` optional), which SHALL parse as a valid empty registry exactly as written.
+- `.ptah/config.toml` — a fully commented skeleton documenting the two-layer registry discovery (project entries override user entries per agent name), `${VAR}` environment interpolation, and the per-agent fields (`command` required, `args` and `env` optional), which SHALL parse as a valid empty registry exactly as written;
+- `.ptah/pesde.toml` — a package-manifest skeleton which SHALL parse as a valid private Pesde manifest targeting the `luau` environment, named `components/<lowercased-current-directory-name>`, with no dependency entries and no `[indices]` table.
 
-The two files have different ownership and different existing-file semantics. `.ptah/config.toml` is user-authored: an existing config SHALL be skipped with a per-file skipped message and never modified. `.ptah/ptah.d.luau` is a derived artifact of the installed binary: init SHALL sync it — created when absent, overwritten with the current binary's emitted definitions whenever its bytes differ from the current output in either accepted form (the emitted output itself, or the emitted output without its header line), and left untouched only when it already matches one of those forms byte-for-byte. The headerless arm exists so a file laid out like the repository's source definitions (the headerless compile input) reports as current instead of being rewritten with a prepended header. Overwrite is otherwise unconditional: a differing file with no parseable ptah version header (hand-edited or foreign) SHALL still be overwritten.
+The three files have different ownership and different existing-file semantics. `.ptah/config.toml` and `.ptah/pesde.toml` are user-authored: an existing file SHALL be skipped with a per-file skipped message and never modified. `.ptah/ptah.d.luau` is a derived artifact of the installed binary: init SHALL sync it — created when absent, overwritten with the current binary's emitted definitions whenever its bytes differ from the current output in either accepted form (the emitted output itself, or the emitted output without its header line), and left untouched only when it already matches one of those forms byte-for-byte. The headerless arm exists so a file laid out like the repository's source definitions (the headerless compile input) reports as current instead of being rewritten with a prepended header. Overwrite is otherwise unconditional: a differing file with no parseable ptah version header (hand-edited or foreign) SHALL still be overwritten.
 
-`ptah init` SHALL NOT create any other files (no starter script, no editor or Luau configuration), SHALL NOT search parent directories for an existing `.ptah`, and SHALL NOT write to the user-level config directory. Running `ptah init` twice with the same binary SHALL change no file: the config is skipped and the definitions already match. On success the command SHALL print exactly one line per file — `created:` or `skipped (exists):` for the config; `created:`, `updated:`, or `up to date:` for the definitions — followed by next-step hints (editing the registry, pointing luau-lsp at the definitions, installing shell completions, the ptah skill) to standard output, and exit 0. An `updated:` definitions line SHALL carry the previous and current version in parentheses when the overwritten file's first line parsed as a ptah version header, and no version suffix otherwise. The hints SHALL print on every run, including runs where no file changed. A failure to write (for example an unwritable directory) SHALL print an error to standard error and exit 1.
+`ptah init` SHALL NOT create any other files (no starter script, no editor configuration), SHALL NOT search parent directories for an existing `.ptah`, SHALL NOT write to the user-level config directory, and SHALL NOT perform package installation: init writes no `pesde.lock`, no `luau_packages/` content, and no root `.luaurc`, and makes no network requests. Running `ptah init` twice with the same binary SHALL change no file: the configs are skipped and the definitions already match. On success the command SHALL print exactly one line per file — `created:` or `skipped (exists):` for the configs; `created:`, `updated:`, or `up to date:` for the definitions — followed by next-step hints (editing the registry, pointing luau-lsp at the definitions, installing shell completions, adding packages, the ptah skill) to standard output, and exit 0. An `updated:` definitions line SHALL carry the previous and current version in parentheses when the overwritten file's first line parsed as a ptah version header, and no version suffix otherwise. The hints SHALL print on every run, including runs where no file changed. A failure to write (for example an unwritable directory) SHALL print an error to standard error and exit 1.
 
 #### Scenario: Fresh init creates both files
 - **WHEN** `ptah init` runs in a directory with no `.ptah`
-- **THEN** `.ptah/ptah.d.luau` and `.ptah/config.toml` exist, the process exits 0, and each created file is announced on standard output
+- **THEN** `.ptah/ptah.d.luau`, `.ptah/config.toml`, and `.ptah/pesde.toml` exist, the process exits 0, and each created file is announced on standard output
 
 #### Scenario: Written definitions match the installed binary
 - **WHEN** `.ptah/ptah.d.luau` written by `ptah init` is compared with `ptah types` output
@@ -194,9 +195,13 @@ The two files have different ownership and different existing-file semantics. `.
 - **WHEN** `.ptah/config.toml` written by `ptah init` is parsed as a registry
 - **THEN** it parses without error and contains no agents
 
+#### Scenario: Manifest skeleton is a valid package manifest
+- **WHEN** `.ptah/pesde.toml` written by `ptah init` is parsed as a Pesde manifest
+- **THEN** it parses without error, is private, targets the `luau` environment, and contains no dependencies or indices
+
 #### Scenario: Re-running init is idempotent
 - **WHEN** `ptah init` runs a second time in the same directory with the same binary
-- **THEN** the config is reported as skipped (exists), the definitions are reported as up to date, no file's bytes change, and the process exits 0
+- **THEN** the configs are reported as skipped (exists), the definitions are reported as up to date, no file's bytes change, and the process exits 0
 
 #### Scenario: Stale definitions are updated
 - **WHEN** `ptah init` runs where `.ptah/ptah.d.luau` was written by an older binary (content differs, first line is a ptah version header naming an older version)
@@ -211,8 +216,12 @@ The two files have different ownership and different existing-file semantics. `.
 - **THEN** the file is not written, it is reported as up to date, and the process exits 0
 
 #### Scenario: Partial scaffold completes
-- **WHEN** `ptah init` runs in a directory where `.ptah/config.toml` already exists but `.ptah/ptah.d.luau` does not
-- **THEN** the definitions file is created, the existing config is neither modified nor clobbered, and the process exits 0
+- **WHEN** `ptah init` runs in a directory where `.ptah/config.toml` and `.ptah/pesde.toml` already exist but `.ptah/ptah.d.luau` does not
+- **THEN** the definitions file is created, the existing configs are neither modified nor clobbered, and the process exits 0
+
+#### Scenario: Init stays offline
+- **WHEN** `ptah init` runs with no network available
+- **THEN** it completes successfully having written only the three scaffold files
 
 #### Scenario: Hints print on every run
 - **WHEN** `ptah init` completes, whether files were created, updated, or unchanged

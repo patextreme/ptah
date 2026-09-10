@@ -54,7 +54,7 @@ fn visible_subcommands_appear_and_bridge_does_not() {
             .unwrap();
         assert!(out.status.success(), "{shell}: {out:?}");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        for sub in ["run", "check", "types", "completions", "init"] {
+        for sub in ["run", "check", "types", "completions", "init", "package"] {
             assert!(
                 stdout.contains(sub),
                 "{shell}: visible subcommand {sub} missing:\n{stdout}"

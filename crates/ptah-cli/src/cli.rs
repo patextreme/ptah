@@ -79,11 +79,70 @@ enum Command {
     /// Scaffold ./.ptah/ (type definitions + agent registry skeleton).
     Init,
 
+    /// Manage workflow packages (install, update, remove).
+    Package {
+        #[command(subcommand)]
+        command: PackageCommand,
+    },
+
     /// Hidden: MCP bridge server for typed results. Spawned per result
     /// session by the agent, as suggested in `session/new { mcpServers }`;
     /// not part of the user-facing surface.
     #[command(name = "__bridge", hide = true)]
     Bridge,
+}
+
+/// Subcommands of `ptah package`.
+#[derive(Subcommand, Debug)]
+enum PackageCommand {
+    /// Add a package dependency and install it.
+    Add {
+        /// Registry package to add: `scope/name[@version]`.
+        #[arg(
+            index = 1,
+            required_unless_present_any = ["git", "path"],
+            conflicts_with_all = ["git", "path"]
+        )]
+        package: Option<String>,
+        /// Add from a git repository instead of the registry.
+        #[arg(long, value_name = "URL", conflicts_with = "package")]
+        git: Option<String>,
+        /// Git revision (branch, tag, or commit); default: the default
+        /// branch tip.
+        #[arg(long, value_name = "REV", requires = "git")]
+        rev: Option<String>,
+        /// With --git: a subdirectory of the repository. Alone: a local
+        /// package directory.
+        #[arg(long, value_name = "DIR", conflicts_with = "package")]
+        path: Option<String>,
+        /// Dependency alias (default: the package name's last segment).
+        #[arg(long, value_name = "ALIAS")]
+        r#as: Option<String>,
+        /// Edit the manifest only; skip install.
+        #[arg(long)]
+        no_install: bool,
+    },
+
+    /// Remove an installed dependency by alias.
+    Remove {
+        /// Alias of the dependency to remove.
+        #[arg(index = 1)]
+        alias: String,
+        /// Edit the manifest only; skip install.
+        #[arg(long)]
+        no_install: bool,
+    },
+
+    /// Install the manifest's dependencies per the lockfile.
+    Install {
+        /// Install exactly the lockfile's versions; fail when it is
+        /// missing or out of sync with the manifest.
+        #[arg(long)]
+        locked: bool,
+    },
+
+    /// Re-resolve every dependency from scratch and install.
+    Update,
 }
 
 /// What `Cli::try_parse_from` produced: dispatch early on subcommands that
@@ -105,6 +164,8 @@ enum Parsed {
     /// `ptah init` — scaffold ./.ptah/ (definitions + registry
     /// skeleton), exit 0 unless writing fails.
     Init,
+    /// `ptah package <subcommand>` — dependency management.
+    Package(PackageCommand),
     /// `ptah check` — verify a script without executing it.
     Check {
         script: PathBuf,
@@ -139,6 +200,7 @@ fn parse(args: &[String]) -> Result<Parsed, clap::Error> {
         Command::Types => Parsed::Types,
         Command::Completions { shell } => Parsed::Completions(shell),
         Command::Init => Parsed::Init,
+        Command::Package { command } => Parsed::Package(command),
         Command::Check {
             script,
             no_color,
@@ -150,6 +212,33 @@ fn parse(args: &[String]) -> Result<Parsed, clap::Error> {
         },
         Command::Bridge => Parsed::Bridge,
     })
+}
+
+/// Dispatch a parsed `ptah package` subcommand to its handler in
+/// [`crate::package`].
+fn dispatch_package(command: PackageCommand) -> ExitCode {
+    match command {
+        PackageCommand::Add {
+            package,
+            git,
+            rev,
+            path,
+            r#as: alias,
+            no_install,
+        } => crate::package::add(crate::package::AddArgs {
+            package,
+            git,
+            rev,
+            path,
+            alias,
+            no_install,
+        }),
+        PackageCommand::Remove { alias, no_install } => {
+            crate::package::remove(alias, no_install)
+        }
+        PackageCommand::Install { locked } => crate::package::install(locked),
+        PackageCommand::Update => crate::package::update(),
+    }
 }
 
 /// `ptah types`: print the definitions with a version header. Everything
@@ -270,7 +359,10 @@ const INIT_HINTS: &str = r#"Next steps:
   3. Install CLI completions for your shell — ptah completions <shell>;
      per-shell install lines are in the README "Shell completions"
      section.
-  4. Scripting ptah from a coding agent? The ptah skill documents the
+  4. Add workflow packages — ptah package add <scope>/<name> (or
+     --git/--path) — and require them from scripts as @<alias>; the
+     README "Package management" section has the full workflow.
+  5. Scripting ptah from a coding agent? The ptah skill documents the
      whole API: skills/ptah/SKILL.md in the ptah repo.
 "#;
 
@@ -337,16 +429,18 @@ fn sync_definitions(path: &str) -> std::io::Result<String> {
 }
 
 /// `ptah init`: scaffold `./.ptah/` in the current working directory
-/// with exactly two files — `ptah.d.luau` (byte-identical to
-/// `ptah types` stdout) and `config.toml` (commented registry
-/// skeleton). The two have different ownership: the config is
+/// with exactly three files — `ptah.d.luau` (byte-identical to
+/// `ptah types` stdout), `config.toml` (commented registry skeleton),
+/// and `pesde.toml` (package-manifest skeleton). The configs are
 /// user-authored — created when absent, skipped with a message
 /// otherwise, never modified — while the definitions are a derived
 /// artifact this binary syncs via `sync_definitions` (created /
 /// updated / confirmed current), so re-running after an upgrade is
 /// the refresh path and a partial scaffold still completes. Hints
 /// print on every run. Requires no script, registry, or agent
-/// configuration; a failure to create the directory or write a file
+/// configuration and stays offline: no lockfile, no `luau_packages/`
+/// content, no root `.luaurc` (those appear with the first package
+/// command). A failure to create the directory or write a file
 /// reports on stderr and exits 1.
 fn run_init() -> ExitCode {
     if let Err(e) = std::fs::create_dir_all("./.ptah") {
@@ -361,6 +455,26 @@ fn run_init() -> ExitCode {
         return ExitCode::from(1);
     } else {
         println!("created: .ptah/config.toml");
+    }
+    // The package manifest: same ownership rule as the config —
+    // created when absent, skipped otherwise, never modified. The
+    // name is derived from the current directory; init itself stays
+    // offline (no resolution, no lockfile, no .luaurc).
+    if std::path::Path::new(".ptah/pesde.toml").exists() {
+        println!("skipped (exists): .ptah/pesde.toml");
+    } else {
+        let dir_name = std::env::current_dir()
+            .ok()
+            .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "project".to_string());
+        if let Err(e) = std::fs::write(
+            ".ptah/pesde.toml",
+            ptah_pesde::manifest::skeleton(&dir_name),
+        ) {
+            eprintln!("error: cannot write .ptah/pesde.toml: {e}");
+            return ExitCode::from(1);
+        }
+        println!("created: .ptah/pesde.toml");
     }
     match sync_definitions(".ptah/ptah.d.luau") {
         Ok(line) => println!("{line}"),
@@ -459,6 +573,7 @@ pub fn main() -> ExitCode {
         Ok(Parsed::Types) => return print_types(),
         Ok(Parsed::Completions(shell)) => return print_completions(shell),
         Ok(Parsed::Init) => return run_init(),
+        Ok(Parsed::Package(command)) => return dispatch_package(command),
         Ok(Parsed::Check {
             script,
             no_color,
@@ -710,6 +825,7 @@ mod tests {
             | Parsed::Check { .. }
             | Parsed::Completions(_)
             | Parsed::Init
+            | Parsed::Package(_)
             | Parsed::Bridge => panic!("expected Types"),
         }
     }

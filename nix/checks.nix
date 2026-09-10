@@ -35,7 +35,10 @@
         # (the embedded definitions under test) and discovers it via
         # PATH; PTAH_REQUIRE_REAL_LSP makes its absence a hard failure
         # here so the sandbox can never silently skip that contract.
-        nativeBuildInputs = [pkgs.luau-lsp];
+        # git: the package-management fixtures clone their local git
+        # index/repositories through gix, whose local transport shells
+        # out to git-upload-pack.
+        nativeBuildInputs = [pkgs.luau-lsp pkgs.git];
         env.PTAH_REQUIRE_REAL_LSP = "1";
       });
 

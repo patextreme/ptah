@@ -53,6 +53,10 @@ ptah check <script.luau> [--no-color] [--ask=<provider>]
 ptah types
 ptah completions <shell>
 ptah init
+ptah package add <scope/name> | --git <url> | --path <dir>
+ptah package remove <alias>
+ptah package install [--locked]
+ptah package update
 ptah --version
 ```
 
@@ -73,10 +77,14 @@ ptah --version
   `bash`, `zsh`, `fish`, `elvish`, or `powershell` (see
   [Shell completions](#shell-completions)); unknown shells are usage
   errors
-- `ptah init` — scaffold `./.ptah/` with the type definitions and a
-  commented registry skeleton (see [Editor setup](#editor-setup));
-  the config skeleton is created once and left alone, the definitions
+- `ptah init` — scaffold `./.ptah/` with the type definitions, a
+  commented registry skeleton, and a package-manifest skeleton (see
+  [Editor setup](#editor-setup) and
+  [Package management](#package-management)); the config and manifest
+  skeletons are created once and left alone, the definitions
   are synced to the installed binary
+- `ptah package …` — install, update, and remove workflow packages
+  (see [Package management](#package-management))
 
 Exit codes: `0` on success, `1` on an uncaught script error or a never-observed
 task error (printed to stderr), `2` on CLI/usage errors, `n` when the script
@@ -660,18 +668,21 @@ allow a provider or remove the dead ask.
 ## Editor setup
 
 `ptah init` is the front door: it scaffolds `./.ptah/` in the current
-directory with exactly two files —
+directory with exactly three files —
 
 - `.ptah/ptah.d.luau` — the Luau type definitions for the script API,
   byte-identical to `ptah types` output (version header included), so
   they always match the installed binary;
 - `.ptah/config.toml` — a fully commented agent-registry skeleton
   (see the comments there for the two-layer discovery and `${VAR}`
-  interpolation rules).
+  interpolation rules);
+- `.ptah/pesde.toml` — a package-manifest skeleton (see
+  [Package management](#package-management)).
 
-The two files have different ownership. `.ptah/config.toml` is
-user-authored: created once, reported as skipped on every later run,
-never modified. `.ptah/ptah.d.luau` is a derived artifact of the
+The files have different ownership. `.ptah/config.toml` and
+`.ptah/pesde.toml` are user-authored: created once, reported as
+skipped on every later run, never modified. `.ptah/ptah.d.luau` is a
+derived artifact of the
 installed binary: init syncs it — created when absent, overwritten
 whenever its bytes differ from the current binary's output, reported
 `up to date` when it already matches. So re-running `ptah init` after
@@ -756,6 +767,71 @@ EOF
 ptah run examples/sequential_review.luau
 ```
 
+## Package management
+
+`ptah package` installs, versions, and updates workflow packages with
+an embedded [Pesde](https://pesde.dev) engine — no separate
+package-manager binary. A ptah project's package state lives inside
+`.ptah/`:
+
+| Path | Owned by | Source control |
+|---|---|---|
+| `.ptah/pesde.toml` | you (scaffolded by `ptah init`) | **commit** |
+| `.ptah/pesde.lock` | ptah (generated) | **commit** |
+| `.luaurc` | you; ptah syncs the package aliases into it | **commit** |
+| `.ptah/luau_packages/` | ptah (generated) | ignore |
+| `.ptah/.pesde/` | ptah (generated cache) | ignore |
+
+The first successful package command in a project prints this
+commit/ignore guidance; ptah never edits ignore files itself.
+
+```sh
+ptah init                                  # scaffolds .ptah/pesde.toml (among the rest)
+ptah package add pesde/hello               # newest compatible release, recorded as ^x.y.z
+ptah package remove hello
+ptah package install                       # per the lockfile; idempotent
+ptah package install --locked              # exactly the lockfile — CI/fresh clones
+ptah package update                        # re-resolve every dependency
+```
+
+`add` accepts three source forms:
+
+- `ptah package add <scope>/<name>[@<version-req>]` — from the default
+  Pesde registry (the index URL is supplied by ptah; the manifest
+  grows no `[indices]` table unless you add one, and a user-added
+  table wins).
+- `ptah package add --git <url> [--rev <rev>] [--path <subdir>]` — from
+  a git repository; without `--rev` it tracks the default branch tip
+  (the lockfile pins the exact tree per install). `--path` selects a
+  subdirectory when the package is nested (the repository's alias
+  defaults to its name; `--as` overrides any default).
+- `ptah package add --path <dir>` — from a local directory (recorded
+  absolutely, so resolution is cwd-independent).
+
+The ptah-libs pattern — a component library distributed as a git repo
+of packages — works with one command per package:
+
+```sh
+ptah package add --git https://github.com/patextreme/ptah-libs --path components/judge --as judge
+```
+
+Installed packages are requirable from workflows two ways: pesde-native
+relative requires and `@alias` requires:
+
+```lua
+--!strict
+local hello = require("@hello")     -- resolved through the root .luaurc
+local util = require("../.ptah/luau_packages/util")  -- relative form
+```
+
+The root `.luaurc` is kept in sync by package commands (aliases map to
+their `luau_packages` entries; your own keys and aliases survive, and
+a user alias colliding with a package alias wins with a warning) —
+the same file the runtime, `ptah check`, luau-lsp, and editors read,
+so all four agree. Exit codes: `0` success, `2` usage errors (bad
+spec, no project, unparseable manifest), `1` operational failures
+(registry/network errors, missing or stale lockfile under `--locked`).
+
 ## Factory Components
 
 [`factory-components/`](factory-components/) is the shared workflow
@@ -805,10 +881,13 @@ The contract that makes the mount work anywhere:
 
 See [`factory-components/README.md`](factory-components/README.md) for
 the full contract and each component's README for its declared
-environment requirements; the distribution decision (source mount, no
-registry, no lockfile) is recorded in the archived
+environment requirements; the distribution story is two channels —
+source mounting (above) and `ptah package` with git or registry
+sources (see [Package management](#package-management)) — recorded in
+the archived
 [`factory-components`](openspec/changes/archive/2026-09-04-factory-components/)
-change.
+and [`add-pesde-package-management`](openspec/changes/add-pesde-package-management/)
+changes.
 
 ## Development
 

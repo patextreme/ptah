@@ -359,3 +359,76 @@ fn real_luau_lsp_definitions_contract() {
         "diagnostic shows the trimmed os members, stderr:\n{stderr}"
     );
 }
+
+/// script-checking "Typecheck pass": `@alias` requires analyze as
+/// their resolved modules — luau-lsp discovers the project-root
+/// `.luaurc` from the entry's path (the D7 verification spike's
+/// confirmed behavior; no `--base-luaurc` needed). A strict script
+/// whose aliased package member misuse produces a luau-lsp diagnostic
+/// exits 1 naming the module; clean alias usage exits 0.
+#[test]
+#[cfg(unix)]
+fn real_luau_lsp_alias_requires_typecheck() {
+    let Some(lsp) = luau_lsp_on_path() else {
+        if std::env::var_os("PTAH_REQUIRE_REAL_LSP").is_some() {
+            panic!("PTAH_REQUIRE_REAL_LSP is set but luau-lsp is not on PATH");
+        }
+        eprintln!("skipping: luau-lsp not on PATH (run inside `nix develop`)");
+        return;
+    };
+    let lsp_dir = lsp.parent().expect("luau-lsp path has a parent");
+
+    let p = Project::new("alias-typecheck");
+    // The ptah-managed alias configuration and an "installed" package
+    // (a hand-written stand-in for luau_packages content).
+    std::fs::write(
+        p.dir.join(".luaurc"),
+        r#"{"aliases": {"hello": "./.ptah/luau_packages/hello"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(p.dir.join(".ptah/luau_packages")).unwrap();
+    std::fs::create_dir_all(p.dir.join(".ptah/workflows")).unwrap();
+    std::fs::write(
+        p.dir.join(".ptah/luau_packages/hello.luau"),
+        "--!strict\n\
+         local M = {}\n\
+         function M.greet(name: string): string\n\
+         \treturn \"hello \" .. name\n\
+         end\n\
+         return M\n",
+    )
+    .unwrap();
+
+    // Misuse through the alias: `geet` does not exist on the module.
+    let misuse = p.dir.join(".ptah/workflows/misuse.luau");
+    std::fs::write(
+        &misuse,
+        "--!strict\n\
+         local hello = require(\"@hello\")\n\
+         return hello.geet(\"world\")\n",
+    )
+    .unwrap();
+    let (code, _stdout, stderr) = p.check(&misuse, lsp_dir);
+    assert_eq!(code, 1, "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("Key 'geet' not found"),
+        "diagnostic names the aliased module misuse, stderr:\n{stderr}"
+    );
+
+    // Clean usage through the alias (deep in the project tree, where
+    // the root config is still discovered upward).
+    let clean = p.dir.join(".ptah/workflows/clean.luau");
+    std::fs::write(
+        &clean,
+        "--!strict\n\
+         local hello = require(\"@hello\")\n\
+         return hello.greet(\"world\")\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = p.check(&clean, lsp_dir);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        !stderr.contains("TypeError"),
+        "clean alias usage must analyze clean, stderr:\n{stderr}"
+    );
+}

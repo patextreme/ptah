@@ -1,0 +1,39 @@
+[package]
+name = "ptah-pesde"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+pesde = { workspace = true }
+toml_edit = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+jiff = { workspace = true, optional = true }
+# Lockfile text generation must be byte-identical to pesde's own
+# writer (idempotent installs rewrite nothing), so this crate pins
+# the same toml line pesde 0.7.4 serializes with — independent of the
+# workspace's toml 1.x pin used by the registry parser.
+toml = "0.9"
+# Version-aligned with pesde 0.7.4's own pins so the tree carries one
+# copy of each; these types cross the adapter boundary (git URLs,
+# version requirements, relative paths) and must be the same crates
+# pesde consumes.
+gix = { version = "0.73", default-features = false }
+semver = "1"
+relative-path = "2"
+
+[features]
+# Offline fixture builders (git repositories, registry indices) built
+# on gix — test-only, enabled by dev-dependency edges (ptah-cli's
+# integration tests and this crate's own git/registry tests).
+test-fixtures = ["dep:jiff"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Self dev-dependency: turns on the fixture builders for this crate's
+# own git/registry tests.
+ptah-pesde = { path = ".", features = ["test-fixtures"] }
