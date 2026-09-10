@@ -141,10 +141,13 @@ impl AliasConfig {
 }
 
 /// Extract the `aliases` table from `.luaurc` JSON (JSONC: comments
-/// stripped first). Returns `None` when the file has no `aliases`
-/// table or fails to parse — the caller treats that as "no alias
-/// configuration here" and the require becomes a finding naming the
-/// alias.
+/// stripped first). Alias keys are lowercased on collection, the
+/// same normalization Luau's config parser applies (`Config::setAlias`
+/// stores keys under `toLower(alias)`), so lookups agree with the
+/// runtime for mixed-case keys. Returns `None` when the file has no
+/// `aliases` table or fails to parse — the caller treats that as "no
+/// alias configuration here" and the require becomes a finding naming
+/// the alias.
 fn parse_aliases(text: &str) -> Option<std::collections::BTreeMap<String, String>> {
     let stripped: String = strip_jsonc_comments(text);
     let value: serde_json::Value = serde_json::from_str(&stripped).ok()?;
@@ -153,7 +156,8 @@ fn parse_aliases(text: &str) -> Option<std::collections::BTreeMap<String, String
         aliases
             .iter()
             .filter_map(|(k, v)| {
-                v.as_str().map(|target| (k.clone(), target.to_string()))
+                v.as_str()
+                    .map(|target| (k.to_ascii_lowercase(), target.to_string()))
             })
             .collect(),
     )
@@ -824,6 +828,30 @@ mod tests {
         let walked = walk(&entry);
         assert_eq!(walked.broken.len(), 1, "{:?}", walked.broken);
         assert!(walked.broken[0].message.contains("@hello"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn mixed_case_alias_keys_resolve_like_the_runtime() {
+        // Luau lowercases both the require string's alias and the
+        // config's keys, so a mixed-case `.luaurc` key is a false
+        // finding nowhere: `@Hello` and `@hello` both resolve. The
+        // target path keeps its case (values are filesystem paths).
+        let base = alias_project("case");
+        fs::write(
+            base.join(".luaurc"),
+            r#"{ "aliases": { "Hello": "./.ptah/luau_packages/hello" } }"#,
+        )
+        .unwrap();
+        for (name, require) in [("upper.luau", "@Hello"), ("lower.luau", "@hello")] {
+            let entry = write(
+                &base.join(".ptah/workflows"),
+                name,
+                &format!("--!strict\nlocal h = require(\"{require}\")\nreturn h\n"),
+            );
+            let walked = walk(&entry);
+            assert!(walked.broken.is_empty(), "{}: {:?}", name, walked.broken);
+        }
         let _ = fs::remove_dir_all(&base);
     }
 

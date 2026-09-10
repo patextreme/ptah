@@ -371,6 +371,34 @@ mod tests {
     }
 
     #[test]
+    fn alias_lookup_is_case_insensitive_like_luau() {
+        // Luau lowercases both the require string's alias and the
+        // `.luaurc` keys (`Config::setAlias` stores keys lowercased),
+        // so a mixed-case key resolves from either spelling while the
+        // target path keeps its case. Pins the runtime side of the
+        // contract the static checker mirrors.
+        let root = alias_project("case");
+        std::fs::write(
+            root.join(".luaurc"),
+            r#"{"aliases": {"Hello": "./.ptah/luau_packages/hello"}}"#,
+        )
+        .unwrap();
+        let script = root.join(".ptah/workflows/x/main.luau");
+        std::fs::write(
+            &script,
+            "return require('@Hello').greet .. require('@hello').greet\n",
+        )
+        .unwrap();
+        let lua = lua_with_require_at(script.parent().unwrap());
+        let out: String = load_at(&lua, &script, &std::fs::read_to_string(&script).unwrap())
+            .unwrap()
+            .to_string()
+            .unwrap();
+        assert_eq!(out, "hi from packagehi from package");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn unknown_alias_rejected_naming_the_alias() {
         let root = alias_project("unknown");
         let script = root.join(".ptah/workflows/x/main.luau");
