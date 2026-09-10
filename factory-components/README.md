@@ -11,6 +11,9 @@ distribution decision and `CONTEXT.md` for the vocabulary.
 
 - `std/` — the stdlib: repo-agnostic machinery that knows nothing about
   any consumer repo.
+  - `session-config.luau` — ordered session-config entries applied to a
+    session as `setConfig` calls (the shared apply mechanism; see
+    [Session config](#session-config)).
   - `predicate.luau` — typed boolean judge (asks an agent whether a
     predicate holds for a payload; bounded retry, exhaustion is a script
     error).
@@ -47,6 +50,46 @@ loops share these conventions, documented here so drift stays visible:
   findings (iteration N of M)` and `<prefix>: did not converge within M
   iterations`.
 
+## Session config
+
+A session-config entry is `{ id: string, value: string | boolean }` —
+one `session:setConfig(id, value)` call. A session-config field
+(`sessionConfig`, `judgeSessionConfig`, or `std/predicate`'s
+`sessionConfig`) takes an ordered *array* of entries, and the array is
+the consumer's `setConfig` call sequence as data: entries apply in
+declared order after session creation, before the session's first
+prompt, via the shared `std/session-config.apply` — the components and
+the judge call it so application semantics cannot drift.
+
+- **Order is load-bearing.** Agents with dependent options (opencode
+  re-derives `effort` from every `model` set) only behave when the
+  driving option is set first — which is why the field is an array, not
+  a table.
+- **No extra validation.** `nil`/empty applies nothing; duplicate ids
+  apply verbatim in order (last wins, exactly as repeated runtime
+  `setConfig` calls); an agent-rejected entry fails through the
+  existing `setConfig` error path with entries before it left applied.
+  Option ids and values are the agent's authority — enumerate them with
+  `session:configOptions()`.
+- **Mixed string/boolean values in one literal** may need an explicit
+  annotation (`local entries: { sessionConfig.Entry } = …`) — the
+  analyzer infers one element type per unannotated array literal.
+
+**Migrating from `model`/`judgeModel`** (removed in the same change that
+introduced entries — a model choice is an ordinary entry):
+
+```lua
+-- before
+model = "claude-opus-4-5",
+judgeModel = "claude-haiku-4-5",
+-- after
+sessionConfig = { { id = "model", value = "claude-opus-4-5" } },
+judgeSessionConfig = { { id = "model", value = "claude-haiku-4-5" } },
+```
+
+`ptah check` names a removed field when you bump — that is the
+compatibility gate doing its job.
+
 ## The component contract
 
 - A component is a facade of typed operations: `new(config)` returns an
@@ -75,8 +118,8 @@ local openspec = require("./vendor/factory-components/components/openspec/compon
 local ops = openspec.new({
 	agent = ptah.agent("claude"),
 	judgeAgent = ptah.agent("claude"),
-	model = "claude-opus-4-5",
-	judgeModel = "claude-haiku-4-5",
+	sessionConfig = { { id = "model", value = "claude-opus-4-5" } },
+	judgeSessionConfig = { { id = "model", value = "claude-haiku-4-5" } },
 })
 
 ops:groom("add-auth")

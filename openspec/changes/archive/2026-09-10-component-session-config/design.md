@@ -125,9 +125,12 @@ asserting on stderr side channels.
   extra line per model pin buys order-expressiveness and a single concept;
   the README examples show the idiom once and it reads clearly.
 - [Luau excess-property checking gaps: does `model = …` reliably produce a
-  check finding?] → Pinned by a test in the compatibility-gate scenario; if
-  the analyzer accepts unknown keys on some construction shape, tighten the
-  scenario to the shapes the analyzer does flag and document the limit.
+  check finding?] → Observed: the analyzer accepts unknown keys in every
+  construction shape, so Config declares the removed fields as nil-typed
+  tombstones (`model: nil`) — any configured value is a type error
+  naming the field, while absence stays clean. Pinned by the
+  compatibility-gate scenario; the READMEs document the migration to the
+  entry form.
 
 ## Migration Plan
 

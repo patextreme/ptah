@@ -24,9 +24,7 @@ mod common;
 use common::PipedRun;
 use ptah::script::{self, RunConfig, RunOutcome};
 use ptah_core::events::SessionEvent;
-use ptah_core::ports::{
-    AskError, AskOutcome, AskProvider, AskRequest, EventSink, InteractionMode,
-};
+use ptah_core::ports::{AskError, AskOutcome, AskProvider, AskRequest, EventSink, InteractionMode};
 
 fn mock_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mock-agent")
@@ -261,10 +259,7 @@ fn ask_raises_four_distinct_failures() {
         ),
         (
             "end-of-input",
-            InteractionMode::Provider(FakeAsk::new(vec![(
-                0,
-                Err(AskError::InputClosed),
-            )])),
+            InteractionMode::Provider(FakeAsk::new(vec![(0, Err(AskError::InputClosed))])),
         ),
     ];
     let mut messages = Vec::new();
@@ -561,7 +556,10 @@ ptah.log("GOT:" .. a.text)
         .lines()
         .filter(|l| l.contains("go ahead") && !l.contains("GOT:"))
         .count();
-    assert_eq!(rendered_echo, 0, "renderer must not re-echo the answer: {all}");
+    assert_eq!(
+        rendered_echo, 0,
+        "renderer must not re-echo the answer: {all}"
+    );
 }
 
 #[test]
@@ -709,7 +707,10 @@ s:close()
     // it): the same subprocess must still be the one and only mock — a
     // restart across the ask would have swapped the pid.
     let after = pids_for(&tag);
-    assert_eq!(during_ask, after, "agent pid must not change across the ask");
+    assert_eq!(
+        during_ask, after,
+        "agent pid must not change across the ask"
+    );
     run.wait_for("SURVIVED");
     let (code, all, stderr) = run.finish();
     assert_eq!(code, 0, "stderr:\n{stderr}\nstdout:\n{all}");

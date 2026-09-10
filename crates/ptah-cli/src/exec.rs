@@ -226,7 +226,10 @@ mod tests {
     #[tokio::test]
     async fn timeout_kills_and_reports() {
         let started = std::time::Instant::now();
-        let out = TokioProcessRunner::new().run("sleep 30", Some(100)).await.unwrap();
+        let out = TokioProcessRunner::new()
+            .run("sleep 30", Some(100))
+            .await
+            .unwrap();
         assert!(out.timed_out);
         assert_eq!(out.exit_code, None);
         assert!(
@@ -239,7 +242,10 @@ mod tests {
     async fn signal_death_normalizes_to_shell_convention() {
         // The shell itself is killed by a signal: normalized to 128+sig
         // so `exit_code` is `Some` for every command that ran.
-        let out = TokioProcessRunner::new().run("kill -9 $$", None).await.unwrap();
+        let out = TokioProcessRunner::new()
+            .run("kill -9 $$", None)
+            .await
+            .unwrap();
         assert_eq!(out.exit_code, Some(137));
     }
 
@@ -247,7 +253,10 @@ mod tests {
     async fn stdin_is_eof_not_the_terminal() {
         // `cat` reads stdin until EOF; with stdin nulled it exits at once.
         let started = std::time::Instant::now();
-        let out = TokioProcessRunner::new().run("cat", Some(5_000)).await.unwrap();
+        let out = TokioProcessRunner::new()
+            .run("cat", Some(5_000))
+            .await
+            .unwrap();
         assert_eq!(out.exit_code, Some(0));
         assert_eq!(out.stdout, "");
         assert!(

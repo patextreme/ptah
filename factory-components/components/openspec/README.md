@@ -32,14 +32,28 @@ local openspec = require("<mount>/factory-components/components/openspec/compone
 local ops = openspec.new({
 	agent = ptah.agent("claude"),       -- work agent handle
 	judgeAgent = ptah.agent("claude"),  -- judge agent handle
-	model = "opus",         -- optional: model config id for work sessions
-	judgeModel = "haiku",   -- optional: model config id for judge sessions
+	sessionConfig = {       -- optional: applied to every work session
+		{ id = "model", value = "opus" },
+	},
+	judgeSessionConfig = {  -- optional: applied to every judge and
+		{ id = "model", value = "haiku" },  -- human-probe session
+	},
 	maxIterations = 10,     -- optional: convergence cap (default 10)
 })
 ```
 
-Functions are not configuration; every field is data or a declared
-agent handle.
+Session-config entries (`{ id, value }`, applied in declared array
+order — see the library README's [Session config](../../README.md#session-config)
+section) reach: `sessionConfig` → every per-iteration work session of
+groom, implement, and verify, plus verify's archive session;
+`judgeSessionConfig` → every judge and human-escalation-probe session.
+Option ids are agent-specific — enumerate what your agent offers with
+`session:configOptions()`. The removed `model`/`judgeModel` fields are
+nil-typed: configuring one is a `ptah check` type error naming the
+field (the migration note in the library README shows the entry form).
+
+Functions are not configuration; every other field is data or a
+declared agent handle.
 
 ## Operations
 

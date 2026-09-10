@@ -61,9 +61,14 @@
 //! - `MOCK_SUBMIT_MATCH` — JSON array of `{"match": "…", "value": …}`
 //!   rules; each prompt scans them in order and submits the value of
 //!   the first rule whose `match` substring occurs in the prompt text.
-//!   No matching rule → no submission (typed result stays nil), which
-//!   is how tests script judge retries and per-iteration verdicts from
-//!   one stateless mock. Takes precedence over `MOCK_SUBMIT`.
+//!   A rule may carry `requiresConfig` (object of config id → required
+//!   current value): the rule only matches when the mock's live option
+//!   state equals every required value — order-sensitive config-state
+//!   gating for session-config propagation tests (state re-seeds at
+//!   every `session/new`). No matching rule → no submission (typed
+//!   result stays nil), which is how tests script judge retries and
+//!   per-iteration verdicts from one stateless mock. Takes precedence
+//!   over `MOCK_SUBMIT`.
 //! - `MOCK_SUBMIT_ONCE` — with `MOCK_SUBMIT`, submit only on the first
 //!   prompt (fresh-slot-per-turn tests)
 //! - `MOCK_SUBMIT_BAD`  — number of invalid submissions (value from
@@ -883,17 +888,34 @@ async fn run_prompt(
             if let Some(rules) = &match_rules {
                 for rule in rules {
                     let needle = rule.get("match").and_then(|v| v.as_str()).unwrap_or("");
-                    if text.contains(needle) {
-                        let value = rule.get("value").cloned().unwrap_or(serde_json::Value::Null);
-                        let result = submit_result(&client, &value).await;
-                        assert!(
-                            result.is_error != Some(true),
-                            "matched submission should be accepted, got: {:?}",
-                            result_text(&result)
-                        );
-                        submitted_ok = true;
-                        break;
+                    if !text.contains(needle) {
+                        continue;
                     }
+                    // `requiresConfig`: the rule fires only when the live
+                    // option state equals every required value (same value
+                    // formatting the MOCK_CONFIG_ECHO reply uses). A gated
+                    // rule that fails its gate is skipped, not consumed —
+                    // later rules still get their chance.
+                    if let Some(required) = rule.get("requiresConfig").and_then(|v| v.as_object()) {
+                        let satisfied = required.iter().all(|(id, want)| {
+                            config.echo_value(id) == want.as_str().unwrap_or_default()
+                        });
+                        if !satisfied {
+                            continue;
+                        }
+                    }
+                    let value = rule
+                        .get("value")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let result = submit_result(&client, &value).await;
+                    assert!(
+                        result.is_error != Some(true),
+                        "matched submission should be accepted, got: {:?}",
+                        result_text(&result)
+                    );
+                    submitted_ok = true;
+                    break;
                 }
             } else {
                 if let Ok(bad_count) = std::env::var("MOCK_SUBMIT_BAD") {
@@ -940,13 +962,11 @@ async fn run_prompt(
             cx.send_notification(SessionNotification::new(
                 session_id.clone(),
                 SessionUpdate::ToolCall(
-                    ToolCall::new("submit-1", "mcp__ptah__result_submit").status(
-                        if submitted_ok {
-                            ToolCallStatus::Completed
-                        } else {
-                            ToolCallStatus::Failed
-                        },
-                    ),
+                    ToolCall::new("submit-1", "mcp__ptah__result_submit").status(if submitted_ok {
+                        ToolCallStatus::Completed
+                    } else {
+                        ToolCallStatus::Failed
+                    }),
                 ),
             ))?;
         }

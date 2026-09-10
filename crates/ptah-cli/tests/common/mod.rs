@@ -172,7 +172,10 @@ impl PipedRun {
         let start = std::time::Instant::now();
         loop {
             if start.elapsed() > std::time::Duration::from_secs(10) {
-                panic!("timed out waiting for {needle:?}; seen:\n{}", self.all_output());
+                panic!(
+                    "timed out waiting for {needle:?}; seen:\n{}",
+                    self.all_output()
+                );
             }
             let mut line = String::new();
             match self.stdout.read_line(&mut line) {

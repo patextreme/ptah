@@ -77,7 +77,10 @@ fn unknown_shell_is_a_usage_error() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     // clap prints the invalid-value error with the accepted shells
     // (its usage guidance for this error kind) and no Usage: block.
-    assert!(stderr.contains("error:"), "expected an error on stderr: {stderr}");
+    assert!(
+        stderr.contains("error:"),
+        "expected an error on stderr: {stderr}"
+    );
     assert!(
         stderr.contains("possible values"),
         "expected the accepted shells on stderr: {stderr}"

@@ -8,9 +8,9 @@ use mlua::luau::Require as _;
 use mlua::{Function, Lua, Value};
 
 use ptah::render::{RenderOptions, Renderer};
-use ptah_core::ports::InteractionMode;
 use ptah::script::{self, RunConfig, require::ScriptRequirer};
 use ptah::task::{TaskRegistry, spawn};
+use ptah_core::ports::InteractionMode;
 
 /// Build a Lua env exactly like production (sandbox + ptah table).
 fn test_lua(script_dir: &std::path::Path) -> Lua {
