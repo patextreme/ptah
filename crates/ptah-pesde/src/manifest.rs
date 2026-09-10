@@ -204,8 +204,14 @@ impl DependencyEntry {
 /// other byte of the document (user tables, comments, formatting).
 /// A pre-existing entry — including the inline form (`hello = { ... }`)
 /// Pesde's own CLI writes — and a top-level inline
-/// `dependencies = { ... }` are edited in place, keeping their form;
-/// an entry that is not a table at all is a manifest-edit error.
+/// `dependencies = { ... }` are replaced field-for-field in place,
+/// keeping their form: every key the new entry does not carry is
+/// dropped, so a re-add records exactly the requested dependency
+/// (stale optional fields — a dropped `path`, `target`, `index` — and
+/// source-form switches must not leave mixed entries behind; Pesde's
+/// specifiers are untagged, so a mixed entry deserializes as whatever
+/// variant matches first, not necessarily the requested one). An entry
+/// that is not a table at all is a manifest-edit error.
 pub fn set_dependency(
     doc: &mut DocumentMut,
     alias: &str,
@@ -238,6 +244,17 @@ pub fn set_dependency(
         .ok_or_else(|| Error::ManifestEdit {
             source: format!("dependency `{alias}` is not a table"),
         })?;
+    // Replace, never merge: clear the entry's existing keys before
+    // writing the new ones (the entry as a whole is ptah-owned once
+    // re-added — the same wholesale replacement Pesde's own `add`
+    // performs).
+    for key in field_table
+        .iter()
+        .map(|(key, _)| key.to_owned())
+        .collect::<Vec<_>>()
+    {
+        field_table.remove(&key);
+    }
     match entry {
         DependencyEntry::Pesde {
             name,
@@ -585,6 +602,149 @@ hello = { name = "pesde/hello", version = "^0.1.0" }
         assert!(written.contains("^0.2.0"), "{written}");
         assert!(!written.contains("^0.1.0"), "old version replaced: {written}");
         toml::from_str::<Manifest>(&written).unwrap();
+    }
+
+    #[test]
+    fn re_adding_drops_fields_the_new_entry_does_not_carry() {
+        // A re-add records exactly the requested dependency: optional
+        // fields the new entry omits are removed, not left behind. A
+        // stale `path` (or `target`/`index`) would silently keep the
+        // install on the old subdirectory/pinning.
+        let mut doc = parse_manifest_doc(
+            r#"
+name = "abc/x"
+version = "0.1.0"
+
+[target]
+environment = "luau"
+
+[dependencies]
+hello = { repo = "https://example.com/repo", rev = "HEAD", path = "pkg/hello" }
+"#,
+        )
+        .unwrap();
+        set_dependency(
+            &mut doc,
+            "hello",
+            &DependencyEntry::Git {
+                repo: "https://example.com/repo".into(),
+                rev: "main".into(),
+                path: None,
+            },
+        )
+        .unwrap();
+        let written = doc.to_string();
+        assert!(!written.contains("pkg/hello"), "stale path dropped: {written}");
+        assert!(written.contains("rev = \"main\""), "new rev written: {written}");
+        let manifest = toml::from_str::<Manifest>(&written).unwrap();
+        let spec = manifest
+            .dependencies
+            .get(&"hello".parse::<pesde::manifest::Alias>().unwrap())
+            .unwrap();
+        assert!(matches!(
+            spec,
+            pesde::source::specifiers::DependencySpecifiers::Git(_)
+        ));
+
+        // Same for a registry entry carrying target/index: both drop
+        // on a plain re-add.
+        let mut doc = parse_manifest_doc(
+            r#"
+name = "abc/x"
+version = "0.1.0"
+
+[target]
+environment = "luau"
+
+[dependencies]
+hello = { name = "abc/hello", version = "^0.1.0", target = "lune", index = "other" }
+"#,
+        )
+        .unwrap();
+        set_dependency(
+            &mut doc,
+            "hello",
+            &DependencyEntry::Pesde {
+                name: "abc/hello".into(),
+                version: "^0.2.0".into(),
+                target: None,
+                index: None,
+            },
+        )
+        .unwrap();
+        let written = doc.to_string();
+        assert!(!written.contains("lune"), "stale target dropped: {written}");
+        assert!(!written.contains("\"other\""), "stale index dropped: {written}");
+        assert!(written.contains("^0.2.0"), "{written}");
+        toml::from_str::<Manifest>(&written).unwrap();
+    }
+
+    #[test]
+    fn re_adding_across_source_forms_switches_the_dependency() {
+        // `ptah package add abc/hello` and `ptah package add --path
+        // ../hello` both default the alias to `hello`. Merging the two
+        // entries produced `{ name, version, path }`, which Pesde's
+        // untagged specifiers deserialize as the *registry* dependency
+        // — silently ignoring the requested local path. The re-add must
+        // switch the entry wholesale.
+        let mut doc = parse_manifest_doc(
+            r#"
+name = "abc/x"
+version = "0.1.0"
+
+[target]
+environment = "luau"
+
+[dependencies]
+hello = { name = "abc/hello", version = "^0.1.0" }
+"#,
+        )
+        .unwrap();
+        set_dependency(
+            &mut doc,
+            "hello",
+            &DependencyEntry::Path {
+                path: "/abs/hello".into(),
+            },
+        )
+        .unwrap();
+        let written = doc.to_string();
+        assert!(!written.contains("abc/hello"), "registry fields dropped: {written}");
+        let manifest = toml::from_str::<Manifest>(&written).unwrap();
+        let spec = manifest
+            .dependencies
+            .get(&"hello".parse::<pesde::manifest::Alias>().unwrap())
+            .unwrap();
+        assert!(matches!(
+            spec,
+            pesde::source::specifiers::DependencySpecifiers::Path(_)
+        ));
+
+        // And the other direction: a path entry re-added as a registry
+        // dependency leaves no stale `path` behind.
+        let mut doc = parse_manifest_doc(&written).unwrap();
+        set_dependency(
+            &mut doc,
+            "hello",
+            &DependencyEntry::Pesde {
+                name: "abc/hello".into(),
+                version: "^0.2.0".into(),
+                target: None,
+                index: None,
+            },
+        )
+        .unwrap();
+        let written = doc.to_string();
+        assert!(!written.contains("/abs/hello"), "stale path dropped: {written}");
+        let manifest = toml::from_str::<Manifest>(&written).unwrap();
+        let spec = manifest
+            .dependencies
+            .get(&"hello".parse::<pesde::manifest::Alias>().unwrap())
+            .unwrap();
+        assert!(matches!(
+            spec,
+            pesde::source::specifiers::DependencySpecifiers::Pesde(_)
+        ));
     }
 
     #[test]

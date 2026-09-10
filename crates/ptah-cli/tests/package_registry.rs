@@ -292,6 +292,76 @@ fn locked_install_from_a_fresh_clone_restores_the_lockfile_state() {
 }
 
 #[test]
+fn re_adding_over_the_same_alias_switches_the_source_form() {
+    // `add abc/hello` then `add --path ../hello`: both default the
+    // alias to `hello`, and the re-add must switch the dependency to
+    // the local path — the manifest entry is path-only and the
+    // *local* package's content is what installs (a merged entry
+    // would silently keep resolving the registry package).
+    let registry =
+        FixtureRegistry::start("switch", &[FixturePackage::hello("0.1.0", "from registry")]);
+    let p = Project::new("switch-proj");
+    let (code, stdout, stderr) = p.package_default_index(&registry, &["add", "ptah_fixture/hello"]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(p.manifest().contains("name = \"ptah_fixture/hello\""), "{}", p.manifest());
+
+    // A local package under the same default alias (`hello`) — the
+    // directory's basename, like `ptah package add --path ../hello`.
+    let local_root = std::env::temp_dir().join(format!("ptah-reg-local-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&local_root);
+    let local = local_root.join("hello");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(
+        local.join("pesde.toml"),
+        "name = \"abc/hello\"\nversion = \"0.1.0\"\n\n[target]\nenvironment = \"luau\"\nlib = \"init.luau\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        local.join("init.luau"),
+        "--!strict\nreturn { greet = function(name: string): string return \"from local \" .. name end }\n",
+    )
+    .unwrap();
+
+    // The fixture index env stays set: even if the manifest edit
+    // regressed to a mixed entry, resolution would stay on the local
+    // fixture registry instead of reaching the network.
+    let (code, stdout, stderr) =
+        p.package_default_index(&registry, &["add", "--path", &local.display().to_string()]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    // The manifest entry is the path form only — no registry fields.
+    let manifest = p.manifest();
+    assert!(
+        manifest.contains(&format!("path = \"{}\"", local.display())),
+        "{manifest}"
+    );
+    assert!(!manifest.contains("ptah_fixture"), "registry fields dropped: {manifest}");
+    // The installed package is the local one: pesde's linker module
+    // re-exports from a container named after the *resolved* package
+    // (abc+hello — the local package), and the container carries the
+    // local code.
+    let container = p.dir.join(".ptah/luau_packages/.pesde/abc+hello");
+    assert!(container.is_dir(), "local container linked: {container:?}");
+    let mut found = false;
+    for entry in walk_files(&container) {
+        if entry.ends_with("init.luau")
+            && std::fs::read_to_string(&entry).is_ok_and(|s| s.contains("from local"))
+        {
+            found = true;
+        }
+    }
+    assert!(found, "local content installed under {container:?}");
+    // And the registry package's container is gone (its dependency
+    // entry no longer exists).
+    assert!(
+        !p.dir
+            .join(".ptah/luau_packages/.pesde/ptah_fixture+hello")
+            .exists(),
+        "removed dependency's container must not survive"
+    );
+    let _ = std::fs::remove_dir_all(&local_root);
+}
+
+#[test]
 fn add_from_a_git_source_with_a_subdirectory_e2e() {
     // The --git e2e shape from the package-add spec: a fixture git
     // repository with the package nested under pkg/hello.
