@@ -193,8 +193,8 @@ local openspec = require("./vendor/factory-components/components/openspec/compon
 local ops = openspec.new({
 	agent = ptah.agent("claude"),       -- work agent handle
 	judgeAgent = ptah.agent("claude"),  -- judge agent handle
-	model = "claude-opus-4-5",
-	judgeModel = "claude-haiku-4-5",
+	sessionConfig = { { id = "model", value = "claude-opus-4-5" } },
+	judgeSessionConfig = { { id = "model", value = "claude-haiku-4-5" } },
 })
 
 ops:groom("add-auth")

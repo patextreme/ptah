@@ -1,13 +1,4 @@
-# Factory Components Specification
-
-## Purpose
-
-The shared workflow library (`factory-components/`): repo-agnostic helper
-modules and composable workflow components that consumer repositories mount
-as source and drive through thin shims, replacing per-repo copies of the
-same agent-orchestration machinery.
-
-## Requirements
+## ADDED Requirements
 
 ### Requirement: Session config application
 
@@ -52,6 +43,8 @@ remain applied.
 - **WHEN** a consumer shim declares a session-config entry with a wrong-typed value or a missing id and runs `ptah check`
 - **THEN** check reports a type error naming the entry shape
 
+## MODIFIED Requirements
+
 ### Requirement: Typed judge
 
 The library SHALL provide a typed boolean judge that asks a designated
@@ -78,35 +71,6 @@ never a hang or a silent default.
 
 - **WHEN** the judge is invoked with session-config entries
 - **THEN** every attempt session receives the entries in declared order before the predicate prompt
-
-### Requirement: GitHub CLI transport
-
-The library SHALL provide a GitHub transport that shells out to the `gh` CLI
-via ptah's exec, returning a structured outcome (exit code, stdout, parsed
-JSON when requested) instead of raising, and SHALL quote arguments so values
-containing spaces or quotes are passed through verbatim.
-
-#### Scenario: Command succeeds with JSON output
-
-- **WHEN** a `gh` invocation exits zero and JSON output is requested
-- **THEN** the transport returns a success outcome carrying the parsed JSON value
-
-#### Scenario: Command fails
-
-- **WHEN** a `gh` invocation exits non-zero
-- **THEN** the transport returns a failure outcome carrying the exit code and stderr, and the calling script keeps running
-
-### Requirement: Daemon loop skeleton
-
-The library SHALL provide a repo-loop skeleton that applies a per-repo
-operation to every configured repository, isolates each repository behind an
-error boundary so one raising repository cannot abort the others, and
-supports both sequential and bounded-concurrency parallel execution.
-
-#### Scenario: One repository raises
-
-- **WHEN** the per-repo operation raises for one of several configured repositories
-- **THEN** the loop records that repository's failure and completes the remaining repositories
 
 ### Requirement: Component facade contract
 
@@ -145,23 +109,6 @@ config type.
 
 - **WHEN** a consumer configures a component's declared session-config field with an ordered array of entry records
 - **THEN** the configuration is accepted as data config and validated against the field's declared entry type
-
-### Requirement: Library self-containment
-
-Library modules SHALL only require other modules within the library tree, so
-the tree works mounted at any path; they SHALL NOT write files inside the
-library tree; and they SHALL NOT invoke exec with a relative working
-directory — repository-relative paths MUST arrive through config.
-
-#### Scenario: Mounted at an arbitrary path
-
-- **WHEN** the library tree is mounted at any directory inside a consumer repo and a shim requires a component by relative path
-- **THEN** the component and its internal requires resolve without reference to the mount location
-
-#### Scenario: Library tree is read-only
-
-- **WHEN** a component runs from a read-only mount (e.g. the nix store)
-- **THEN** the workflow completes without attempting to write inside the library tree
 
 ### Requirement: openspec component
 
@@ -258,9 +205,9 @@ The component's config SHALL accept `sessionConfig`, an ordered
 session-config entry array applied to every work session the component
 creates (each review/fix iteration's session, which also posts the verdict
 comment), and `judgeSessionConfig`, applied to every judge and
-human-escalation-probe session. The `model` and `judgeModel` config
-fields SHALL NOT exist: a model choice is an ordinary `sessionConfig`
-entry, and the entry order is the consumer's `setConfig` order.
+human-escalation-probe session. The `model` and `judgeModel` config fields
+SHALL NOT exist: a model choice is an ordinary `sessionConfig` entry, and
+the entry order is the consumer's `setConfig` order.
 
 #### Scenario: Review finds fixable findings
 
@@ -286,76 +233,3 @@ entry, and the entry order is the consumer's `setConfig` order.
 
 - **WHEN** a consumer shim configures the removed `model` or `judgeModel` field and runs `ptah check`
 - **THEN** check reports a type error naming the unknown field, steering the consumer to the `sessionConfig` entry form
-
-### Requirement: PR review instruction contract
-
-The pr-review-loop component's documentation SHALL declare the contract its
-reviewer instruction must satisfy: a configured reviewer instruction defines
-what counts as a blocking issue for the repository and instructs the
-reviewer to classify findings as blocking or non-blocking, and the
-component's judge predicates and fix prompts speak that classification
-vocabulary. The component's config surface (the exported `Config` type's
-doc comment for `reviewInstruction`) SHALL state the classification
-requirement. The documentation SHALL also state the component's boundary:
-verdicts that do not reduce to a blocking/non-blocking classification
-(score gates, approve/request-changes, report-only reviews) are a different
-component, not an instruction swap.
-
-The documentation SHALL present pointer-style instructions — reviewer
-instruction text that references a repository document — as the recommended
-form when the instruction is long or repo-pinned, noting that configured
-text is inlined into every iteration's review prompt.
-
-The component SHALL ship a built-in default instruction that satisfies this
-contract and SHALL use it when no reviewer instruction is configured; a
-configured reviewer instruction SHALL take precedence over the built-in
-default, as a full replacement (the configured text is the entire
-instruction, inlined into the review prompt). Only a nil `reviewInstruction`
-selects the built-in default.
-
-#### Scenario: Instruction contract is declared
-
-- **WHEN** a consumer consults the pr-review-loop component's documentation before supplying a reviewer instruction
-- **THEN** the required blocking/non-blocking verdict classification is stated, along with the boundary that verdicts not reducible to it belong to a different component
-
-#### Scenario: Config surface states the classification requirement
-
-- **WHEN** a consumer reads the exported `Config` type for the pr-review-loop component
-- **THEN** the `reviewInstruction` field's documentation states that a configured reviewer instruction must classify findings as blocking or non-blocking, and that a nil value selects the built-in default
-
-#### Scenario: Built-in default instruction used when none is configured
-
-- **WHEN** the component is configured without `reviewInstruction` (the field is nil)
-- **THEN** reviews run against the component's built-in default instruction, which directs the reviewer to classify each finding as blocking or non-blocking (the default is the contract's reference instance)
-
-#### Scenario: Configured instruction takes precedence
-
-- **WHEN** `reviewInstruction` is configured with instruction text
-- **THEN** the built-in default is not used — the configured text is inlined into the review prompt, the default's classification directive is absent, and the configured instruction governs the review
-
-#### Scenario: Pointer pattern is the documented long form
-
-- **WHEN** a consumer consults the pr-review-loop component's documentation with a long or repo-pinned reviewer instruction in mind
-- **THEN** the documentation presents pointer-style text referencing a repository document as the recommended form
-
-### Requirement: Dogfooded in this repository
-
-This repository's own `.ptah/workflows/*` SHALL be shims that require the
-library rather than carrying their own helper copies; after this change no
-workflow helper module SHALL be duplicated under `.ptah/`.
-
-#### Scenario: Repo workflow uses the library
-
-- **WHEN** the openspec groom and verify workflows in this repository run
-- **THEN** their convergence and judging behavior comes from the library, and grepping `.ptah/` finds no second copy of the judge or transport
-
-### Requirement: Offline test coverage
-
-Every stdlib module and component entry point SHALL be exercised by the
-offline test suite against the mock agent, with no network access and no
-real agent.
-
-#### Scenario: Library regressions caught offline
-
-- **WHEN** a library module's behavior breaks (e.g. the judge stops returning verdicts)
-- **THEN** the offline suite fails without spawning any real agent

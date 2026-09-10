@@ -144,7 +144,10 @@ mod tests {
     async fn line_answer_responds_with_the_line_unprocessed() {
         assert_eq!(ask_over(b"go ahead\n", false).await, respond("go ahead"));
         // Surrounding whitespace and case are the answer, not gestures.
-        assert_eq!(ask_over(b"  ship  it  \n", false).await, respond("  ship  it  "));
+        assert_eq!(
+            ask_over(b"  ship  it  \n", false).await,
+            respond("  ship  it  ")
+        );
         // A CRLF terminator is stripped whole (the terminator, not the
         // text).
         assert_eq!(ask_over(b"yes\r\n", false).await, respond("yes"));

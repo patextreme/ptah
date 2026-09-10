@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ptah::config::Registry;
-use ptah_core::ports::InteractionMode;
 use ptah::exec::TokioProcessRunner;
 use ptah::render::{RenderOptions, Renderer};
 use ptah::script::{self, RunConfig, RunOutcome};
+use ptah_core::ports::InteractionMode;
 
 mod common;
 

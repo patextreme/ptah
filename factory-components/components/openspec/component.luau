@@ -7,6 +7,7 @@
 -- environment requirements.
 
 local predicate = require("../../std/predicate")
+local sessionConfig = require("../../std/session-config")
 
 export type Config = {
 	-- Work agent handle driving the openspec skills.
@@ -14,9 +15,19 @@ export type Config = {
 	-- Judge agent handle for the typed predicates (can be the same
 	-- handle with a different model).
 	judgeAgent: Agent,
-	-- Optional per-session model config ids for work and judge sessions.
-	model: string?,
-	judgeModel: string?,
+	-- Ordered session-config entries applied to every work session the
+	-- component creates: every per-iteration session of groom,
+	-- implement, and verify, and verify's archive session.
+	sessionConfig: { sessionConfig.Entry }?,
+	-- Ordered session-config entries applied to every judge and
+	-- human-escalation-probe session (forwarded into every predicate
+	-- call).
+	judgeSessionConfig: { sessionConfig.Entry }?,
+	-- The removed model fields, kept nil-typed so a configured value
+	-- is a type error naming the field (the analyzer does not flag
+	-- unknown keys): a model choice is an ordinary sessionConfig entry.
+	model: nil,
+	judgeModel: nil,
 	-- Convergence cap shared by every operation (default 10).
 	maxIterations: number?,
 }
@@ -60,16 +71,14 @@ function M.new(config: Config): Instance
 		for iteration = 0, maxIterations - 1 do
 			local header = `[{sessionId} iteration {iteration + 1} of {maxIterations}]\n`
 			local session: Session = work:session({ id = `{sessionId}:{iteration}` })
-			if config.model ~= nil then
-				session:setConfig("model", config.model)
-			end
+			sessionConfig.apply(session, config.sessionConfig)
 
 			local outcome = session:prompt(header .. prompt)
 			if
 				predicate(opts.accepted, outcome.text, {
 					agent = config.judgeAgent,
-					model = config.judgeModel,
 					sessionId = `{sessionId}-judge:{iteration}`,
+					sessionConfig = config.judgeSessionConfig,
 				})
 			then
 				session:close()
@@ -81,8 +90,8 @@ function M.new(config: Config): Instance
 			local probe = session:prompt(header .. opts.probePrompt)
 			local needsHuman = predicate(opts.humanPredicate, probe.text, {
 				agent = config.judgeAgent,
-				model = config.judgeModel,
 				sessionId = `{sessionId}-human:{iteration}`,
+				sessionConfig = config.judgeSessionConfig,
 			})
 			if needsHuman then
 				session:close()
@@ -154,9 +163,7 @@ function M.new(config: Config): Instance
 			-- The sync-and-archive step is part of the same operation: it
 			-- runs once the verification loop has converged.
 			local archiver: Session = work:session({ id = "openspec-archiver" })
-			if config.model ~= nil then
-				archiver:setConfig("model", config.model)
-			end
+			sessionConfig.apply(archiver, config.sessionConfig)
 			archiver:prompt(`Please sync and archive the change {change}`)
 			archiver:close()
 			ptah.log(`openspec: change {change} synced and archived`)

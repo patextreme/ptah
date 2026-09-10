@@ -85,8 +85,12 @@ local prReview = require("<mount>/factory-components/components/pr-review-loop/c
 local loop = prReview.new({
 	agent = ptah.agent("claude"),        -- work agent handle
 	judgeAgent = ptah.agent("claude"),   -- judge agent handle
-	model = "opus",                      -- optional: work model id
-	judgeModel = "haiku",                -- optional: judge model id
+	sessionConfig = {                    -- optional: applied to every
+		{ id = "model", value = "opus" },    -- review/fix iteration session
+	},
+	judgeSessionConfig = {               -- optional: applied to every judge
+		{ id = "model", value = "haiku" },   -- and human-probe session
+	},
 	-- optional (default when nil: the built-in instruction): the
 	-- entire reviewer instruction as text; must classify findings
 	-- blocking/non-blocking (the instruction contract above). Long or
@@ -97,6 +101,16 @@ local loop = prReview.new({
 	maxIterations = 15,                  -- optional: cap (default 15)
 })
 ```
+
+Session-config entries (`{ id, value }`, applied in declared array
+order — see the library README's [Session config](../../README.md#session-config)
+section) reach: `sessionConfig` → each review/fix iteration's work
+session (the session that also posts the verdict comment);
+`judgeSessionConfig` → every judge and human-escalation-probe session.
+Option ids are agent-specific — enumerate what your agent offers with
+`session:configOptions()`. The removed `model`/`judgeModel` fields are
+nil-typed: configuring one is a `ptah check` type error naming the
+field (the migration note in the library README shows the entry form).
 
 ## Operations
 

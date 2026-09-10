@@ -11,6 +11,7 @@
 -- session posts the verdict comment.
 
 local predicate = require("../../std/predicate")
+local sessionConfig = require("../../std/session-config")
 local defaultInstruction = require("./default-instruction")
 
 export type Config = {
@@ -18,9 +19,19 @@ export type Config = {
 	agent: Agent,
 	-- Judge agent handle for the typed predicates.
 	judgeAgent: Agent,
-	-- Optional per-session model config ids for work and judge sessions.
-	model: string?,
-	judgeModel: string?,
+	-- Ordered session-config entries applied to every work session the
+	-- component creates: each review/fix iteration's session, which
+	-- also posts the verdict comment.
+	sessionConfig: { sessionConfig.Entry }?,
+	-- Ordered session-config entries applied to every judge and
+	-- human-escalation-probe session (forwarded into every predicate
+	-- call).
+	judgeSessionConfig: { sessionConfig.Entry }?,
+	-- The removed model fields, kept nil-typed so a configured value
+	-- is a type error naming the field (the analyzer does not flag
+	-- unknown keys): a model choice is an ordinary sessionConfig entry.
+	model: nil,
+	judgeModel: nil,
 	-- Optional reviewer instruction as direct text — the entire
 	-- instruction when configured. It must define what counts as a
 	-- blocking issue for this repository and direct the reviewer to
@@ -64,9 +75,7 @@ function M.new(config: Config): Instance
 			for iteration = 0, maxIterations - 1 do
 				local header = `[pr-review iteration {iteration + 1} of {maxIterations}]\n`
 				local session: Session = work:session({ id = `pr-review:{iteration}` })
-				if config.model ~= nil then
-					session:setConfig("model", config.model)
-				end
+				sessionConfig.apply(session, config.sessionConfig)
 
 				-- One template serves any instruction: configured text fully
 				-- replaces the built-in default, `or` being exactly the
@@ -81,8 +90,8 @@ function M.new(config: Config): Instance
 				if
 					predicate("The review verdict does not contain blocking issues", outcome.text, {
 						agent = config.judgeAgent,
-						model = config.judgeModel,
 						sessionId = `pr-review-judge:{iteration}`,
+						sessionConfig = config.judgeSessionConfig,
 					})
 				then
 					-- The converged session posts the verdict comment.
@@ -100,8 +109,8 @@ function M.new(config: Config): Instance
 				)
 				local needsHuman = predicate("Human input is required to resolve the blocking issues", probe.text, {
 					agent = config.judgeAgent,
-					model = config.judgeModel,
 					sessionId = `pr-review-human:{iteration}`,
+					sessionConfig = config.judgeSessionConfig,
 				})
 				if needsHuman then
 					session:close()

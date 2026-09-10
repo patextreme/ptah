@@ -187,5 +187,8 @@ fn example_ask_prohibited_by_none_fails_the_preflight() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
     assert!(stderr.contains("prohibited"), "{stderr}");
-    assert!(stdout.is_empty(), "nothing renders before the run: {stdout}");
+    assert!(
+        stdout.is_empty(),
+        "nothing renders before the run: {stdout}"
+    );
 }

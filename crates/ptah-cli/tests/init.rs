@@ -37,11 +37,7 @@ fn types_stdout() -> Vec<u8> {
 fn fresh_init_creates_exactly_both_files_with_hints() {
     let dir = tempfile::tempdir().unwrap();
     let (code, stdout, stderr) = init(dir.path());
-    assert_eq!(
-        code,
-        0,
-        "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(code, 0, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
 
     let config = dir.path().join(".ptah").join("config.toml");
     let defs = dir.path().join(".ptah").join("ptah.d.luau");
@@ -84,8 +80,7 @@ fn written_definitions_are_byte_identical_to_types_stdout() {
     assert!(types_out.status.success());
     let written = std::fs::read(dir.path().join(".ptah").join("ptah.d.luau")).unwrap();
     assert_eq!(
-        written,
-        types_out.stdout,
+        written, types_out.stdout,
         "init's ptah.d.luau must be byte-identical to `ptah types` stdout"
     );
 }
@@ -95,8 +90,7 @@ fn written_skeleton_parses_as_an_empty_registry() {
     let dir = tempfile::tempdir().unwrap();
     let (code, stdout, stderr) = init(dir.path());
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    let skeleton =
-        std::fs::read_to_string(dir.path().join(".ptah").join("config.toml")).unwrap();
+    let skeleton = std::fs::read_to_string(dir.path().join(".ptah").join("config.toml")).unwrap();
     let registry = ptah::config_fs::from_parts(None, Some(&skeleton))
         .unwrap_or_else(|e| panic!("skeleton must parse: {e}"));
     assert!(
@@ -114,11 +108,7 @@ fn rerunning_init_reports_skips_and_is_idempotent() {
     let first_defs = std::fs::read(dir.path().join(".ptah").join("ptah.d.luau")).unwrap();
 
     let (code, stdout, stderr) = init(dir.path());
-    assert_eq!(
-        code,
-        0,
-        "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(code, 0, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("skipped (exists): .ptah/config.toml"),
         "config skip line missing: {stdout}"
@@ -156,20 +146,13 @@ fn stale_definitions_are_updated_with_version_arrow() {
     .unwrap();
 
     let (code, stdout, stderr) = init(dir.path());
-    assert_eq!(
-        code,
-        0,
-        "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(code, 0, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
     assert_eq!(
         std::fs::read(dir.path().join(".ptah").join("ptah.d.luau")).unwrap(),
         types_stdout(),
         "stale definitions must be overwritten with the current emit"
     );
-    assert!(
-        stdout.contains("updated"),
-        "update line missing: {stdout}"
-    );
+    assert!(stdout.contains("updated"), "update line missing: {stdout}");
     assert!(
         stdout.contains("(0.0.1 -> "),
         "version arrow must carry the parsed old version: {stdout}"
@@ -189,20 +172,14 @@ fn modified_or_foreign_definitions_are_overwritten() {
     .unwrap();
 
     let (code, stdout, stderr) = init(dir.path());
-    assert_eq!(
-        code,
-        0,
-        "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(code, 0, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
     assert_eq!(
         std::fs::read(dir.path().join(".ptah").join("ptah.d.luau")).unwrap(),
         types_stdout(),
         "modified definitions must be overwritten with the current emit"
     );
     assert!(
-        stdout
-            .lines()
-            .any(|l| l == "updated: .ptah/ptah.d.luau"),
+        stdout.lines().any(|l| l == "updated: .ptah/ptah.d.luau"),
         "update line must carry no version suffix: {stdout}"
     );
 }
@@ -225,11 +202,7 @@ fn source_layout_definitions_report_up_to_date() {
     std::fs::write(&defs, &body).unwrap();
 
     let (code, stdout, stderr) = init(dir.path());
-    assert_eq!(
-        code,
-        0,
-        "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(code, 0, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("up to date: .ptah/ptah.d.luau"),
         "source-layout definitions must report up to date: {stdout}"
@@ -249,11 +222,7 @@ fn preexisting_config_survives_while_missing_defs_are_created() {
     std::fs::write(dir.path().join(".ptah").join("config.toml"), user_config).unwrap();
 
     let (code, stdout, stderr) = init(dir.path());
-    assert_eq!(
-        code,
-        0,
-        "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert_eq!(code, 0, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("skipped (exists): .ptah/config.toml"),
         "existing config must be reported skipped: {stdout}"
@@ -280,7 +249,10 @@ fn unwritable_target_fails_cleanly() {
     std::fs::write(dir.path().join(".ptah"), "i am a file, not a directory").unwrap();
     let (code, stdout, stderr) = init(dir.path());
     assert_eq!(code, 1, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stderr.contains("error"), "expected an error on stderr: {stderr}");
+    assert!(
+        stderr.contains("error"),
+        "expected an error on stderr: {stderr}"
+    );
     let top: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

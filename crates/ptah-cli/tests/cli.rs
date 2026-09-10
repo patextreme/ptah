@@ -1195,12 +1195,7 @@ ptah.log("parked")
 /// The agent's argv carries `tag` so /proc can find exactly this run's
 /// agent (the mock ignores unknown args).
 #[cfg(unix)]
-fn signal_cancels_the_run_killing_the_agent(
-    sig: i32,
-    expected_code: i32,
-    name: &str,
-    tag: &str,
-) {
+fn signal_cancels_the_run_killing_the_agent(sig: i32, expected_code: i32, name: &str, tag: &str) {
     use std::io::BufRead;
     use std::process::Stdio;
 
@@ -1211,8 +1206,10 @@ fn signal_cancels_the_run_killing_the_agent(
 
     // `name` (not the tag) keys the dir: ptah's own cmdline must stay
     // tag-free so /proc counts exactly the agent.
-    let dir =
-        std::env::temp_dir().join(format!("ptah-cli-signal-agent-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "ptah-cli-signal-agent-{name}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join(".ptah")).unwrap();
     std::fs::write(
@@ -1376,9 +1373,7 @@ fn second_signal_sweeps_agents_and_execs_then_exits_with_its_code() {
         // The spawned exec and the main body's prompt race each other
         // onto the screen (either order); both must be in flight before
         // signaling.
-        if seen.contains("prompt: hang")
-            && seen.contains(&format!("exec: sleep {exec_tag}"))
-        {
+        if seen.contains("prompt: hang") && seen.contains(&format!("exec: sleep {exec_tag}")) {
             break;
         }
     }
@@ -1394,7 +1389,10 @@ fn second_signal_sweeps_agents_and_execs_then_exits_with_its_code() {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(exec_alive, "exec child alive (sh may have exec'd into sleep)");
+    assert!(
+        exec_alive,
+        "exec child alive (sh may have exec'd into sleep)"
+    );
 
     unsafe {
         libc::kill(child.id() as i32, libc::SIGTERM);

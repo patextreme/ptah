@@ -44,6 +44,14 @@ against the scope, not against the whole change.
 _Avoid_: filter (the component cannot see the tasks), instruction (a
 scope redefines completion; an instruction does not)
 
+**Session config**:
+The ordered list of `(id, value)` entries a component applies to every
+session it creates, via `setConfig`, in declared order — the consumer's
+`setConfig` sequence as data. Order is load-bearing for agents with
+dependent options.
+_Avoid_: model config (model is one entry, not the concept); config
+table (a table cannot carry order)
+
 **Reviewer instruction**:
 The text that tells the work agent how to review — a configured instruction
 in Local config, or the component's built-in default. A long or repo-pinned

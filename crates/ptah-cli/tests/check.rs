@@ -503,8 +503,7 @@ fn ask_unresolvable_off_terminal_is_a_finding_naming_remedies() {
 fn ask_with_explicit_provider_in_ci_is_clean() {
     let p = Project::new("ask-env");
     let script = ask_script(&p);
-    let (code, stdout, stderr) =
-        p.check_env(&script, &happy_lsp(), &[], &[("PTAH_ASK", "stdin")]);
+    let (code, stdout, stderr) = p.check_env(&script, &happy_lsp(), &[], &[("PTAH_ASK", "stdin")]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
 }
 
@@ -608,8 +607,7 @@ fn invalid_ptah_ask_env_is_a_discovery_failure_exit_2() {
         "names the accepted values: {stderr}"
     );
 
-    let (code, _stdout, stderr) =
-        p.check_env(&script, &happy_lsp(), &[], &[("PTAH_ASK", "bogus")]);
+    let (code, _stdout, stderr) = p.check_env(&script, &happy_lsp(), &[], &[("PTAH_ASK", "bogus")]);
     assert_eq!(code, 2, "stderr:\n{stderr}");
     assert!(stderr.contains("PTAH_ASK"), "{stderr}");
 }
@@ -637,7 +635,10 @@ fn run_preflight_ask_prohibited_fails_before_spawn() {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
     assert!(stderr.contains("prohibited"), "{stderr}");
-    assert!(stdout.is_empty(), "nothing renders before the run: {stdout}");
+    assert!(
+        stdout.is_empty(),
+        "nothing renders before the run: {stdout}"
+    );
 }
 
 #[test]
@@ -667,7 +668,10 @@ fn run_preflight_ask_unresolvable_off_terminal_fails_before_spawn() {
     for knob in ["--ask", "PTAH_ASK", "[ask]"] {
         assert!(stderr.contains(knob), "finding must name {knob}: {stderr}");
     }
-    assert!(stdout.is_empty(), "nothing renders before the run: {stdout}");
+    assert!(
+        stdout.is_empty(),
+        "nothing renders before the run: {stdout}"
+    );
 }
 
 #[test]

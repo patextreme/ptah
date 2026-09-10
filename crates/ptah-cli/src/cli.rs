@@ -314,8 +314,7 @@ fn sync_definitions(path: &str) -> std::io::Result<String> {
         }
         Err(e) => return Err(e),
     };
-    if existing == emitted.as_bytes()
-        || existing == crate::check::defs::TYPE_DEFINITIONS.as_bytes()
+    if existing == emitted.as_bytes() || existing == crate::check::defs::TYPE_DEFINITIONS.as_bytes()
     {
         return Ok(format!("up to date: {path}"));
     }
@@ -391,9 +390,9 @@ fn resolve_interaction(
     let from_env = match env {
         None => None,
         Some("") => None,
-        Some(raw) => Some(AskProviderKind::from_str(raw).map_err(|e| {
-            format!("invalid PTAH_ASK value: {e}")
-        })?),
+        Some(raw) => Some(
+            AskProviderKind::from_str(raw).map_err(|e| format!("invalid PTAH_ASK value: {e}"))?,
+        ),
     };
     let kind = flag.or(from_env).or(section).or_else(|| {
         // Auto-detection: stdin only on a fully interactive terminal.
@@ -425,15 +424,18 @@ fn run_check(script: PathBuf, no_color: bool, ask: Option<AskProviderKind>) -> E
             return ExitCode::from(2);
         }
     };
-    let interaction =
-        match resolve_interaction(ask, std::env::var("PTAH_ASK").ok().as_deref(), registry.ask().map(|a| a.provider), stdin_is_tty() && stdout_is_tty())
-        {
-            Ok(mode) => mode,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::from(2);
-            }
-        };
+    let interaction = match resolve_interaction(
+        ask,
+        std::env::var("PTAH_ASK").ok().as_deref(),
+        registry.ask().map(|a| a.provider),
+        stdin_is_tty() && stdout_is_tty(),
+    ) {
+        Ok(mode) => mode,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let code = crate::check::check(&crate::check::CheckConfig {
         script_path: script,
         registry,
@@ -783,7 +785,10 @@ mod tests {
         let (header, body) = bytes
             .split_once('\n')
             .unwrap_or_else(|| panic!("no header line: {bytes:?}"));
-        assert_eq!(header, format!("-- ptah {} type definitions", crate::VERSION));
+        assert_eq!(
+            header,
+            format!("-- ptah {} type definitions", crate::VERSION)
+        );
         assert_eq!(
             body,
             crate::check::defs::TYPE_DEFINITIONS,
@@ -798,10 +803,7 @@ mod tests {
             Some("0.0.1".to_string())
         );
         assert_eq!(
-            parse_defs_header(&format!(
-                "-- ptah {} type definitions",
-                crate::VERSION
-            )),
+            parse_defs_header(&format!("-- ptah {} type definitions", crate::VERSION)),
             Some(crate::VERSION.to_string())
         );
     }
@@ -873,11 +875,7 @@ mod tests {
         let line = sync_definitions(path.to_str().unwrap()).unwrap();
         assert_eq!(
             line,
-            format!(
-                "updated: {} (0.0.1 -> {})",
-                path.display(),
-                crate::VERSION
-            )
+            format!("updated: {} (0.0.1 -> {})", path.display(), crate::VERSION)
         );
         assert_eq!(
             std::fs::read(&path).unwrap(),
@@ -923,9 +921,7 @@ mod tests {
             _ => panic!("expected Check"),
         }
         match parse(&args(&["check", "s.luau", "--no-color"])).unwrap() {
-            Parsed::Check {
-                no_color: true, ..
-            } => {}
+            Parsed::Check { no_color: true, .. } => {}
             _ => panic!("expected Check"),
         }
     }

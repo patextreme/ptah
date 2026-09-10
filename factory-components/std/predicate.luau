@@ -7,10 +7,15 @@
 -- handles, no writes, no relative-cwd dependence, requires stay inside
 -- the tree.
 
+local sessionConfig = require("./session-config")
+
 export type PredicateOptions = {
 	agent: Agent,
 	sessionId: string,
-	model: string?,
+	-- Ordered session-config entries applied to every attempt session
+	-- before its prompt (no dedicated model field: a model choice is an
+	-- ordinary entry).
+	sessionConfig: { sessionConfig.Entry }?,
 	maxAttempts: number?,
 }
 
@@ -49,9 +54,7 @@ local function predicate(predicateText: string, payload: string, options: Predic
 			id = options.sessionId,
 			resultSchema = { type = "boolean" },
 		})
-		if options.model ~= nil then
-			session:setConfig("model", options.model)
-		end
+		sessionConfig.apply(session, options.sessionConfig)
 		local promptResult = session:prompt(buildPrompt(predicateText, payload))
 		local verdict = promptResult.result :: boolean?
 		session:close()

@@ -10,8 +10,8 @@ local agent = ptah.agent("pi")
 local loop = prReview.new({
 	agent = agent,
 	judgeAgent = agent,
-	model = "zai/glm-5.3",
-	judgeModel = "zai/glm-5.3-flash",
+	sessionConfig = { { id = "model", value = "zai/glm-5.3" } },
+	judgeSessionConfig = { { id = "model", value = "zai/glm-5.3-flash" } },
 	dryRun = false,
 	maxIterations = 15,
 })

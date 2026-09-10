@@ -13,8 +13,8 @@ local openspec = require("../../../factory-components/components/openspec/compon
 local opsx = openspec.new({
 	agent = piAgent,
 	judgeAgent = piAgent,
-	model = "zai/glm-5.3",
-	judgeModel = "zai/glm-5.3-flash",
+	sessionConfig = { { id = "model", value = "zai/glm-5.3" } },
+	judgeSessionConfig = { { id = "model", value = "zai/glm-5.3-flash" } },
 })
 
 -- WORKFLOW
