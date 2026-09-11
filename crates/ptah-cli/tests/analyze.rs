@@ -155,6 +155,24 @@ fn real_luau_lsp_definitions_contract() {
         "diagnostic must name the accepted value types, stderr:\n{stderr}"
     );
 
+    // type-definitions "SessionId type-checks" (rejecting side): an
+    // argument on the zero-arg identity method reports an arity error
+    // naming the method (accepting side: the strict probe fixture
+    // binds `s:sessionId()` and uses it as a string — nix ptah-analyze).
+    let p = Project::new("bad-sessionid-arity");
+    let script = p.write(
+        "--!strict\n\
+         local agent = ptah.agent(\"mock\")\n\
+         local s = agent:session()\n\
+         s:sessionId(42)\n",
+    );
+    let (code, _stdout, stderr) = p.check(&script, lsp_dir);
+    assert_eq!(code, 1, "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("Argument count mismatch") && stderr.contains("sessionId"),
+        "diagnostic must name the arity mismatch on sessionId, stderr:\n{stderr}"
+    );
+
     // type-definitions "Typo in result field" / "Typed-result surface
     // type-checks" (rejecting side): an invented prompt-outcome field
     // reports a type error naming the result table type.

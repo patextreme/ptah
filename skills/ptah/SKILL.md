@@ -124,7 +124,8 @@ file.
 | `session:prompt(text, { timeoutMs = n }?)` | One turn → `PromptResult` (below). **Timeout raises a catchable Lua error** after sending a cancel — `pcall` it if you need to survive. |
 | `session:cancel()` | Cancel the in-flight turn; the blocked `prompt` returns normally with `stopReason = "cancelled"`. |
 | `session:close()` | End session, reap the process. |
-| `session:label()` | `"agentName/sessionId"` string (a method — call with `:`). Handy for logs. |
+| `session:label()` | `"agentName/localId"` string — ptah's attribution label for this session (a method — call with `:`). Handy for logs. |
+| `session:sessionId()` | The **agent-assigned ACP session id** (a method — call with `:`): the id the agent itself generated for this session, meaningful to that agent's own tooling (resume commands, agent-side session listings). Opaque to ptah; **not** the label. |
 | `session:configOptions()` | Live per-session config options (see [Config](#per-session-config-models-etc)). |
 | `session:setConfig(id, value)` | Set a config option between turns; raises a catchable error carrying the id + agent message on rejection. |
 | `ptah.spawn(fn)` → `task:await()` | Concurrent task; errors re-raise at the await site. |
@@ -426,6 +427,19 @@ end
   an abort.
 - **Ask prompts always render**, even under `--quiet` — a suppressed
   prompt is a hung run. The answer text is never re-echoed.
+
+A human answering an ask may need to inspect the session on the agent
+side (ptah renders no transcripts and cannot resume a session itself).
+Compose `session:sessionId()` into the details so they can correlate —
+any wording works, there is no canonical key:
+
+```lua
+--!strict
+local answer = ptah.ask({
+	prompt = "Unblock the review session?",
+	details = "session " .. s:label() .. " (agent-side id: " .. s:sessionId() .. ")",
+})
+```
 
 ## Typed results, details
 

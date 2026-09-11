@@ -138,6 +138,11 @@ pub enum SessionCmd {
 pub struct SessionHandle {
     /// Attribution label (`agent/session`).
     pub label: String,
+    /// The agent-assigned ACP session id (the id the agent generated
+    /// in its `session/new` response). Opaque to ptah; meaningful to
+    /// the agent's own tooling (resume commands, agent-side session
+    /// listings). Stable for the session's lifetime.
+    pub session_id: String,
     /// OS process id of the agent subprocess (for teardown assertions).
     pub pid: u32,
     pub cmd_tx: mpsc::UnboundedSender<SessionCmd>,
@@ -155,6 +160,7 @@ impl std::fmt::Debug for SessionHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionHandle")
             .field("label", &self.label)
+            .field("session_id", &self.session_id)
             .field("pid", &self.pid)
             .finish_non_exhaustive()
     }

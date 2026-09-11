@@ -3230,6 +3230,7 @@ dependencies = [
  "ptah-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

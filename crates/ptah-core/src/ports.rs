@@ -52,7 +52,9 @@ impl BridgeConfig {
 /// future transports must satisfy. Manually boxed futures keep the trait
 /// object-safe without an async-trait dependency.
 pub trait AgentTransport: Send + Sync {
-    /// Start one agent session and drive it until closed.
+    /// Start one agent session and drive it until closed. The returned
+    /// handle's `session_id` carries the agent-assigned ACP session id
+    /// (stable for the session's lifetime); transports must supply one.
     fn start_session<'a>(
         &'a self,
         spec: &'a AgentSpec,
