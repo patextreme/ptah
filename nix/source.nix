@@ -27,33 +27,32 @@
     ptahSrc = pkgs.lib.cleanSourceWith {
       src = ../.;
       filter = path: type:
-      # Local runtime state and tooling configs — read from the
+        # Local runtime state and tooling configs — read from the
         # invocation dir at run time, never compile inputs — and nix/,
         # packaging only, so cargo builds stay insensitive to nix edits.
-        # Exceptions: inside .ptah/, the checked-in type definitions (a
-        # genuine compile input via include_str! in src/cli.rs) and the
-        # workflow shims (test-covered code — tests/factory_components.rs
-        # runs them against the mock agent, so they must survive in the
+        # Exceptions inside .ptah/: the checked-in type definitions (a
+        # genuine compile input via include_str! in src/cli.rs), the
+        # workflow shims (test-covered code — tests/ptah_libs.rs runs
+        # them against the mock agent, so they must survive in the
         # sandbox source; the directory itself must pass the filter or
-        # the whole subtree is pruned); and the factory-components/
-        # library wholesale (same test-covered reasoning), whitelisted
-        # before the basename blocklist so the repo-root `openspec`
-        # spec-dir exclusion can never collide with a library directory
-        # (e.g. components/openspec). Keeping the rest of .ptah/ out
-        # means `nix run .` still does not rebuild when local .ptah
-        # scripts/config (or editor/agent scaffolding) change.
+        # the whole subtree is pruned), and the package manifest +
+        # lockfile (the pin-guard test reads the lockfile to assert the
+        # flake-pinned library matches the committed pin). The rest of
+        # .ptah/ (generated packages, caches, local config) stays out,
+        # so `nix run .` does not rebuild when local .ptah scripts or
+        # config change.
         if pkgs.lib.hasSuffix "/.ptah" path
         then type == "directory"
         else if pkgs.lib.hasSuffix "/.ptah/ptah.d.luau" path
+        then true
+        else if pkgs.lib.hasSuffix "/.ptah/pesde.toml" path
+        then true
+        else if pkgs.lib.hasSuffix "/.ptah/pesde.lock" path
         then true
         else if pkgs.lib.hasSuffix "/.ptah/workflows" path
         then type == "directory"
         else if pkgs.lib.hasInfix "/.ptah/workflows/" path
         then type == "directory" || pkgs.lib.hasSuffix ".luau" path
-        else if pkgs.lib.hasSuffix "/factory-components" path
-        then type == "directory"
-        else if pkgs.lib.hasInfix "/factory-components/" path
-        then true
         else if pkgs.lib.hasInfix "/.ptah/" path
         then false
         else

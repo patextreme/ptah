@@ -809,11 +809,11 @@ ptah package update                        # re-resolve every dependency
 - `ptah package add --path <dir>` — from a local directory (recorded
   absolutely, so resolution is cwd-independent).
 
-The ptah-libs pattern — a component library distributed as a git repo
-of packages — works with one command per package:
+The ptah-libs pattern — a workflow library distributed as a git repo —
+is exactly how this repository consumes its own library:
 
 ```sh
-ptah package add --git https://github.com/patextreme/ptah-libs --path components/judge --as judge
+ptah package add --git https://github.com/patextreme/ptah-libs --as ptah_libs
 ```
 
 Installed packages are requirable from workflows two ways: pesde-native
@@ -834,26 +834,29 @@ spec, no project, unparseable manifest, malformed `PTAH_DEFAULT_INDEX`
 override), `1` operational failures (registry/network errors, missing
 or stale lockfile under `--locked`).
 
-## Factory Components
+## Ptah Playbooks
 
-[`factory-components/`](factory-components/) is the shared workflow
-library: repo-agnostic stdlib helpers (`std/`) — the typed boolean
-judge (`predicate`), the GitHub CLI transport (`gh`), and the repo-loop
-skeleton (`daemon`) — plus
-composable workflow components (`components/`) such as the openspec
-lifecycle and a PR review loop. The scripts under
-`.ptah/workflows/` are shims over it (dogfooding is what keeps the copies
-from drifting).
+[Ptah Playbooks](https://github.com/patextreme/ptah-libs) (`ptah-libs`) is
+the shared Luau workflow library: repo-agnostic stdlib helpers — the typed
+boolean judge (`std.predicate`), the GitHub CLI transport (`std.gh`), the
+repo-loop skeleton (`std.daemon`), the session-config mechanism
+(`std.sessionConfig`), and the ask transport (`std.escalate`) — plus
+composable playbooks (`openspec`, `prReviewLoop`). It is consumed as a
+**pesde git dependency** installed by `ptah package`:
 
-The library is consumed as **source**: mount the tree wherever you
-like (nix flake input + symlink, git submodule, vendored copy) and
-write a shim — the only workflow code your repo owns:
+```sh
+ptah package add --git https://github.com/patextreme/ptah-libs --rev <tag> --as ptah_libs
+```
+
+A consumer requires the generated package shim and writes the only workflow
+code it owns — the scripts under this repository's `.ptah/workflows/` are
+exactly such shims (dogfooding is what keeps them from drifting):
 
 ```lua
 --!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local libs = require("@ptah_libs")
 
-local ops = openspec.new({
+local ops = libs.openspec.new({
 	agent = ptah.agent("claude"),       -- work agent handle
 	judgeAgent = ptah.agent("claude"),  -- judge agent handle (a small/fast model is ideal)
 	sessionConfig = { { id = "model", value = "claude-opus-4-5" } },
@@ -863,33 +866,27 @@ local ops = openspec.new({
 ops:groom("add-auth")
 ```
 
-The contract that makes the mount work anywhere:
+The contract:
 
-- **Mount-point freedom** — `require` is relative to the requiring
-  file and may traverse outside the shim's directory, and library
-  modules only require within their own tree, so the mount location is
-  your free choice (a read-only nix store path included).
-- **Data config plus agent handles** — every component field is data
-  (strings, numbers, booleans) or a ptah runtime handle the component's
+- **Data config plus agent handles** — every playbook field is data
+  (strings, numbers, booleans) or a ptah runtime handle the playbook's
   config type declares (`agent: Agent`); functions are not
   configuration. Per-call data (a change name, a PR URL) is a method
   argument.
 - **`ptah check` is the compatibility gate** — every module is
-  `--!strict` and every component exports its `Config` type, so your
-  shim's config is type-checked against the component's type when you
+  `--!strict` and every playbook exports its `Config` type, so your
+  shim's config is type-checked against the playbook's type when you
   run `ptah check` — a mistyped field is a finding naming the field.
-  When you bump the mounted source, the check is what catches the
-  break.
+  When you bump the dependency, the check is what catches the break.
 
-See [`factory-components/README.md`](factory-components/README.md) for
-the full contract and each component's README for its declared
-environment requirements; the distribution story is two channels —
-source mounting (above) and `ptah package` with git or registry
-sources (see [Package management](#package-management)) — recorded in
-the archived
-[`factory-components`](openspec/changes/archive/2026-09-04-factory-components/)
-and [`add-pesde-package-management`](openspec/changes/add-pesde-package-management/)
-changes.
+See the [Ptah Playbooks
+README](https://github.com/patextreme/ptah-libs) for the full contract and
+each playbook's declared environment requirements. This repository pins the
+library in `.ptah/pesde.toml` (tracks `main`; `.ptah/pesde.lock` is the
+exact pin) and installs it into `.ptah/luau_packages/` — see
+[Package management](#package-management) and the archived
+[`add-pesde-package-management`](openspec/changes/archive/2026-09-11-add-pesde-package-management/)
+change.
 
 ## Development
 

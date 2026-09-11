@@ -16,6 +16,16 @@
     flake-parts = {
       url = "github:hercules-ci/flake-parts";
     };
+
+    # The shared workflow library (Ptah Playbooks), pinned to the commit the
+    # committed `.ptah/pesde.lock` resolves. The dev shell and the nix gates
+    # install it offline from this checkout; a `ptah package update` must be
+    # paired with `nix flake update ptah-libs` — the pin-guard test in
+    # tests/ptah_libs.rs asserts the two pins agree.
+    ptah-libs = {
+      url = "github:patextreme/ptah-libs/0a282f942af9da6c8b1387c2aebfff3687ee4c11";
+      flake = false;
+    };
   };
 
   outputs = inputs @ {flake-parts, ...}:

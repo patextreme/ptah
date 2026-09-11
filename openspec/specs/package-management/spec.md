@@ -2,7 +2,7 @@
 
 ## Purpose
 
-First-class package management for ptah projects: installing, versioning, and updating workflow packages (Factory Components material) through `ptah package` commands, backed by an embedded Pesde engine so no separate package-manager binary is required.
+First-class package management for ptah projects: installing, versioning, and updating workflow packages (Ptah Playbooks material) through `ptah package` commands, backed by an embedded Pesde engine so no separate package-manager binary is required.
 
 ## Requirements
 
