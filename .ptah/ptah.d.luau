@@ -179,11 +179,15 @@ export type Agent = {
 }
 
 -- One live agent session (own subprocess). `label` is a method, not a
--- property: call it as `session:label()`.
+-- property: call it as `session:label()`. `sessionId` is the agent-side
+-- ACP session id (assigned by the agent at session creation, meaningful
+-- to the agent's own tooling) — distinct from `label`, the ptah-local
+-- attribution id.
 export type Session = {
 	prompt: (self: Session, text: string, opts: PromptOptions?) -> PromptResult,
 	cancel: (self: Session) -> (),
 	label: (self: Session) -> string,
+	sessionId: (self: Session) -> string,
 	close: (self: Session) -> (),
 	configOptions: (self: Session) -> { ConfigOption },
 	setConfig: (self: Session, id: string, value: string | boolean) -> (),

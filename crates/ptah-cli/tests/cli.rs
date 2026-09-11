@@ -333,6 +333,47 @@ s:close()
     );
 }
 
+#[test]
+fn session_ready_line_carries_the_acp_session_id() {
+    // render-logging spec "Session-ready line names the ACP session
+    // id": verbose renders exactly one ready line shaped
+    // `{label}: session ready (acp {id})` with the agent-assigned id;
+    // default and quiet modes suppress it (the label stays the only
+    // session id that renders there).
+    let project = Project::new("ready-line", &[]);
+    let script = project.script(
+        r#"
+local s = ptah.agent("mock"):session()
+s:prompt("hi")
+s:close()
+"#,
+    );
+
+    // Verbose: exactly one ready line carrying the mock's agent-assigned
+    // id (each session owns its agent process, and the mock numbers
+    // session ids from 1 per process, so the id is mock-session-1).
+    let (code, stdout, _) = project.run(&script, &["--no-color", "--verbose"]);
+    assert_eq!(code, 0, "{stdout}");
+    let stripped = common::strip_timestamps(&stdout);
+    let expected = "[ptah] mock/s1: session ready (acp mock-session-1)";
+    let ready_lines = stripped.lines().filter(|l| *l == expected).count();
+    assert_eq!(ready_lines, 1, "one ready line with the id:\n{stdout}");
+
+    // Default and quiet: no ready line at all.
+    let (code, stdout, _) = project.run(&script, &["--no-color"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        !common::strip_timestamps(&stdout).contains("session ready"),
+        "default mode must not render a ready line:\n{stdout}"
+    );
+    let (code, stdout, _) = project.run(&script, &["--no-color", "--quiet"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        !common::strip_timestamps(&stdout).contains("session ready"),
+        "quiet mode must not render a ready line:\n{stdout}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tool-line rendering (agent-sessions spec: the tool-line contract)
 // ---------------------------------------------------------------------------

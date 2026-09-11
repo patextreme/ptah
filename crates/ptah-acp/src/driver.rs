@@ -11,7 +11,7 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, ContentChunk, EnvVariable, McpServer, McpServerStdio,
     PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionValue, SessionNotification, SessionUpdate,
+    SessionConfigOption, SessionConfigOptionValue, SessionId, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, StopReason, TextContent,
 };
 use agent_client_protocol::{ByteStreams, Client, ConnectionTo};
@@ -65,7 +65,7 @@ async fn start_session_inner(
     } = proc;
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCmd>();
-    let (ready_tx, ready_rx) = oneshot::channel::<Result<(), SessionError>>();
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<SessionId, SessionError>>();
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
 
     let fold = Arc::new(Mutex::new(TurnFold::with_cwd(opts.cwd.clone())));
@@ -240,10 +240,13 @@ async fn start_session_inner(
                         driver_sink.emit(
                             &driver_label,
                             SessionEvent::Lifecycle {
-                                message: format!("{driver_label}: session ready"),
+                                message: format!(
+                                    "{driver_label}: session ready (acp {})",
+                                    hs.session_id
+                                ),
                             },
                         );
-                        let _ = ready_tx.send(Ok(()));
+                        let _ = ready_tx.send(Ok(hs.session_id.clone()));
                         run_command_loop(
                             &conn,
                             &mut cmd_rx,
@@ -292,8 +295,9 @@ async fn start_session_inner(
     });
 
     match ready_rx.await {
-        Ok(Ok(())) => Ok(SessionHandle {
+        Ok(Ok(session_id)) => Ok(SessionHandle {
             label,
+            session_id: session_id.to_string(),
             pid,
             cmd_tx,
             done_rx,

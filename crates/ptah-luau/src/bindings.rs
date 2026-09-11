@@ -115,6 +115,16 @@ fn new_session_obj(lua: &Lua, handle: SessionHandle) -> mlua::Result<Table> {
         lua.create_function(move |_lua, _self: Table| Ok(label.clone()))?,
     )?;
 
+    // The agent-side ACP session id (assigned in the agent's
+    // `session/new` response) — opaque to ptah, meaningful to the
+    // agent's own tooling. Distinct from `label`, the ptah-local
+    // attribution id.
+    let session_id = handle.session_id.clone();
+    t.set(
+        "sessionId",
+        lua.create_function(move |_lua, _self: Table| Ok(session_id.clone()))?,
+    )?;
+
     let config_handle = handle.clone();
     t.set(
         "configOptions",
@@ -816,4 +826,128 @@ fn outcome_entry(lua: &Lua, res: mlua::Result<MultiValue>) -> mlua::Result<Table
         }
     }
     Ok(entry)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The `sessionId()` binding contract (scripting delta): the
+    //! agent-assigned ACP session id — non-empty, present before the
+    //! first prompt, and distinct from the ptah-local label — served
+    //! through an in-process loopback transport (no subprocess, no
+    //! network; the established offline double).
+
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use ptah_core::config::Registry;
+    use ptah_core::events::SessionEvent;
+    use ptah_core::ports::{AgentTransport, EventSink, InteractionMode};
+    use ptah_core::session::{SessionCmd, SessionHandle, SessionOptions};
+
+    use crate::run;
+    use crate::state::RunConfig;
+
+    /// Loopback transport: returns handles carrying canned agent-side
+    /// ids (`acp-session-{n}`, one per start) and serves the command
+    /// channel just enough for close/join to complete.
+    struct LoopbackTransport {
+        next: AtomicU64,
+    }
+
+    impl Default for LoopbackTransport {
+        fn default() -> Self {
+            Self {
+                next: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl AgentTransport for LoopbackTransport {
+        fn start_session<'a>(
+            &'a self,
+            _spec: &'a ptah_core::config::AgentSpec,
+            opts: SessionOptions,
+            _sink: Arc<dyn EventSink>,
+        ) -> Pin<Box<dyn Future<Output = Result<SessionHandle, ptah_core::session::SessionError>> + 'a>>
+        {
+            let n = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+            Box::pin(async move {
+                let (cmd_tx, mut cmd_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<SessionCmd>();
+                let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+                tokio::spawn(async move {
+                    while let Some(cmd) = cmd_rx.recv().await {
+                        if matches!(cmd, SessionCmd::Close) {
+                            break;
+                        }
+                    }
+                    let _ = done_tx.send(true);
+                });
+                Ok(SessionHandle {
+                    label: opts.label,
+                    session_id: format!("acp-session-{n}"),
+                    pid: 0,
+                    cmd_tx,
+                    done_rx,
+                    turn_lock: Arc::new(tokio::sync::Mutex::new(())),
+                    config_options: Arc::new(Mutex::new(Vec::new())),
+                })
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<String>>);
+
+    impl EventSink for RecordingSink {
+        fn emit(&self, _label: &str, _event: SessionEvent) {}
+        fn script_log(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn session_id_returns_the_agent_assigned_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("main.luau");
+        std::fs::write(
+            &script,
+            r#"local agent = ptah.agent({ command = "loopback" })
+local one = agent:session({ id = "one" })
+local sid = one:sessionId()
+ptah.log("one=" .. sid)
+ptah.log("one-label=" .. one:label())
+local two = agent:session({ id = "two" })
+ptah.log("two=" .. two:sessionId())
+"#,
+        )
+        .unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let cfg = RunConfig {
+            script_path: script,
+            invocation_dir: dir.path().to_path_buf(),
+            registry: Registry::default(),
+            transport: Arc::new(LoopbackTransport::default()),
+            process_runner: None,
+            interaction: InteractionMode::Unresolved,
+            shutdown: None,
+            renderer: sink.clone(),
+            env: Default::default(),
+        };
+        let outcome = tokio::task::LocalSet::new().run_until(run(cfg)).await;
+        assert_eq!(outcome.code, 0, "error: {:?}", outcome.error);
+
+        let logs = sink.0.lock().unwrap().clone();
+        // The agent-assigned id (exactly what the transport handed back),
+        // available before any prompt.
+        assert!(logs.contains(&"one=acp-session-1".to_string()), "logs: {logs:?}");
+        // Distinct sessions carry distinct agent ids.
+        assert!(logs.contains(&"two=acp-session-2".to_string()), "logs: {logs:?}");
+        // The id is neither the label nor its local-id suffix — and the
+        // first id is non-empty by the exact-match asserts above.
+        assert!(logs.contains(&"one-label=loopback/one".to_string()), "logs: {logs:?}");
+    }
 }

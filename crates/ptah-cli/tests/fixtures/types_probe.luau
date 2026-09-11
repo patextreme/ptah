@@ -29,6 +29,12 @@ local s = agent:session({ id = "rev", cwd = ".", mcpServers = servers })
 -- session:label() is a method (not a property) at runtime.
 assert(s:label() == "demo/rev", "label: " .. s:label())
 
+-- session:sessionId() is likewise a method: the agent-side ACP session
+-- id (agent-assigned at session creation), never the ptah-local label.
+local sid = s:sessionId()
+assert(type(sid) == "string" and #sid > 0, "sessionId: " .. tostring(sid))
+assert(sid ~= "rev" and sid ~= "demo/rev", "sessionId must not be the label: " .. sid)
+
 -- prompt result: text, stopReason, usage table (mock MOCK_USAGE=5,10,2,3),
 -- prompt options: timeoutMs.
 local r = s:prompt("review this", { timeoutMs = 5000 })

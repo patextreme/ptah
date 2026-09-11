@@ -296,6 +296,7 @@ asking only; the permission posture above is unaffected by it.
 | `session:prompt(text, {timeoutMs=})` | One turn → `{ text, stopReason, usage, result }` (`result` is the turn's typed-result value, `nil` without one; `__tostring` → text; `text` is the turn's last agent message — see below); concurrent `prompt` calls on one session queue behind the in-flight turn |
 | `session:cancel()` | Cancels the in-flight turn (returns `stopReason = "cancelled"`) |
 | `session:close()` | Ends the session and reaps the agent process |
+| `session:sessionId()` | The agent-assigned ACP session id (a method — call with `:`): the id the agent itself generated for this session, meaningful to that agent's own tooling (e.g. its resume command or session listing); opaque to ptah and distinct from the `agentName/sN` attribution label |
 | `session:configOptions()` | Live per-session config options (empty table when the agent offers none) |
 | `session:setConfig(id, value)` | Set a config option between turns — string (select choice id) or boolean value; raises on agent rejection |
 | `ptah.spawn(fn)` → `task:await()` | Concurrent task; errors re-raise at the await site |
