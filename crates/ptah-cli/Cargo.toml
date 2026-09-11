@@ -31,9 +31,13 @@ ptah-acp = { path = "../ptah-acp" }
 ptah-check = { path = "../ptah-check" }
 ptah-config = { path = "../ptah-config" }
 ptah-luau = { path = "../ptah-luau" }
+ptah-pesde = { path = "../ptah-pesde" }
 ptah-render = { path = "../ptah-render" }
 ptah-result = { path = "../ptah-result" }
 agent-client-protocol = { workspace = true }
+# Injected into the package-management driver (ptah-pesde takes a
+# client by design).
+reqwest = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 futures = { workspace = true }
@@ -50,3 +54,9 @@ tracing-subscriber = { workspace = true }
 libc = { workspace = true }
 mlua = { workspace = true }
 tempfile = { workspace = true }
+# Fixture builders (git repositories, registry indices) for the
+# offline package-management e2e tests.
+ptah-pesde = { path = "../ptah-pesde", features = ["test-fixtures"] }
+# Gzipping fixture package tarballs for the loopback registry (already
+# in the tree via pesde's async-compression).
+flate2 = "1"

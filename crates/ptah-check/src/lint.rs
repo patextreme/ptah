@@ -94,9 +94,154 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// A literal require string is navigable only when explicitly relative.
+/// A literal require string is navigable only when explicitly relative
+/// or an alias form.
 fn is_relative_module(module: &str) -> bool {
     module.starts_with("./") || module.starts_with("../")
+}
+
+fn is_alias_module(module: &str) -> bool {
+    module.starts_with('@')
+}
+
+/// One discovered `.luaurc` alias configuration: the file's directory
+/// and its parsed `aliases` table.
+#[derive(Debug, Clone)]
+struct AliasConfig {
+    /// Directory containing the `.luaurc` (alias targets anchor here).
+    dir: PathBuf,
+    /// alias name -> target path string, exactly as written.
+    aliases: std::collections::BTreeMap<String, String>,
+}
+
+impl AliasConfig {
+    /// Find the nearest `.luaurc` at or above `dir` whose `aliases`
+    /// table defines `alias` — Luau's navigator keeps walking past
+    /// configurations that parse but lack the alias. A
+    /// `.config.luau` (Luau-source configuration) cannot be parsed
+    /// statically — documented divergence: ptah never writes one,
+    /// and the runtime remains the source of truth for it.
+    fn discover(dir: &Path, alias: &str) -> Option<Self> {
+        let mut current: &Path = dir;
+        loop {
+            let candidate = current.join(".luaurc");
+            if candidate.is_file()
+                && let Ok(text) = std::fs::read_to_string(&candidate)
+                && let Some(aliases) = parse_aliases(&text)
+                && aliases.contains_key(alias)
+            {
+                return Some(Self {
+                    dir: current.to_path_buf(),
+                    aliases,
+                });
+            }
+            current = current.parent()?;
+        }
+    }
+}
+
+/// Extract the `aliases` table from `.luaurc` JSON (JSONC: comments
+/// stripped first). Alias keys are lowercased on collection, the
+/// same normalization Luau's config parser applies (`Config::setAlias`
+/// stores keys under `toLower(alias)`), so lookups agree with the
+/// runtime for mixed-case keys. Returns `None` when the file has no
+/// `aliases` table or fails to parse — the caller treats that as "no
+/// alias configuration here" and the require becomes a finding naming
+/// the alias.
+fn parse_aliases(text: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let stripped: String = strip_jsonc_comments(text);
+    let value: serde_json::Value = serde_json::from_str(&stripped).ok()?;
+    let aliases = value.get("aliases")?.as_object()?;
+    Some(
+        aliases
+            .iter()
+            .filter_map(|(k, v)| {
+                v.as_str()
+                    .map(|target| (k.to_ascii_lowercase(), target.to_string()))
+            })
+            .collect(),
+    )
+}
+
+/// Strip `//`-line and `/*`-block comments outside strings — enough for
+/// `.luaurc` JSONC as written by editors and tools.
+fn strip_jsonc_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if c == '\\' {
+                if let Some(&escaped) = chars.peek() {
+                    out.push(escaped);
+                    chars.next();
+                }
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                for skipped in chars.by_ref() {
+                    if skipped == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut closed = false;
+                while let Some(c2) = chars.next() {
+                    if c2 == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        closed = true;
+                        break;
+                    }
+                    if c2 == '\n' {
+                        out.push('\n');
+                    }
+                }
+                let _ = closed; // unterminated comment: treated as ended
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Resolve an alias require's target the way the runtime does: nearest
+/// `.luaurc` at or above the requiring file's directory, alias target
+/// anchored at that config's directory, remaining segments appended.
+fn resolve_alias(from_dir: &Path, alias_path: &str) -> Result<PathBuf, String> {
+    let (alias, rest) = match alias_path[1..].split_once('/') {
+        Some((a, r)) => (a, Some(r)),
+        None => (&alias_path[1..], None),
+    };
+    // Luau lowercases alias names during lookup.
+    let alias = alias.to_ascii_lowercase();
+    let config = AliasConfig::discover(from_dir, &alias).ok_or_else(|| {
+        format!(
+            "cannot resolve alias `{alias}`: no .luaurc defining it found above {}",
+            from_dir.display()
+        )
+    })?;
+    let target = config.aliases.get(&alias).ok_or_else(|| {
+        format!("cannot resolve alias `{alias}`: not defined in {}", config.dir.join(".luaurc").display())
+    })?;
+    // Alias targets anchor like relative paths at the config's
+    // directory (the runtime resolves `./`-form targets there).
+    let mut joined = config.dir.join(target.trim_start_matches("./"));
+    if let Some(rest) = rest {
+        joined = joined.join(rest);
+    }
+    Ok(normalize(&joined))
 }
 
 /// Resolve an already-joined module path to a physical file:
@@ -115,12 +260,6 @@ fn resolve_file(path: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// Statically resolve a literal require argument exactly as the runtime
-/// navigator would, relative to the requiring file's directory.
-fn resolve_candidates(from_dir: &Path, module: &str) -> Option<PathBuf> {
-    resolve_file(&normalize(&from_dir.join(module)))
 }
 
 /// Walk the literal require graph from `entry` (a canonicalized path),
@@ -201,14 +340,23 @@ pub(crate) fn walk(entry: &Path) -> WalkResult {
 /// physical module file, or a finding message naming the problem.
 fn resolve_edge(from_file: &Path, module: &str) -> Result<PathBuf, String> {
     let from_dir = from_file.parent().unwrap_or(Path::new("."));
+    if is_alias_module(module) {
+        let target = resolve_alias(from_dir, module)?;
+        return resolve_file(&target).ok_or_else(|| {
+            format!(
+                "cannot resolve require `{module}`: no module file at {}",
+                target.display()
+            )
+        });
+    }
     if !is_relative_module(module) {
         return Err(format!(
             "require path is not relative to the script: `{module}` \
-             (only \"./\" and \"../\" paths are allowed)"
+             (only \"./\", \"../\", and \"@alias\" paths are allowed)"
         ));
     }
     let target = normalize(&from_dir.join(module));
-    resolve_candidates(from_dir, module).ok_or_else(|| {
+    resolve_file(&target).ok_or_else(|| {
         format!(
             "cannot resolve require `{module}`: no module file at {}",
             target.display()
@@ -515,7 +663,7 @@ mod tests {
             "main.luau",
             "--!strict\n\
              local a = require(\"./lib/missing\")\n\
-             local c = require(\"@alias/thing\")\n\
+             local c = require(\"shared/helper\")\n\
              return a, c\n",
         );
         let walk_result = walk(&entry);
@@ -537,6 +685,181 @@ mod tests {
                 .message
                 .contains("not relative to the script")
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Alias requires (resolved through the nearest .luaurc, exactly
+    // like the runtime).
+    // ------------------------------------------------------------------
+
+    fn alias_project(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "ptah-lint-alias-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join(".ptah/workflows")).unwrap();
+        fs::create_dir_all(base.join(".ptah/luau_packages")).unwrap();
+        fs::write(
+            base.join(".luaurc"),
+            r#"{ "aliases": { "hello": "./.ptah/luau_packages/hello" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            base.join(".ptah/luau_packages/hello.luau"),
+            "--!strict\nreturn {}\n",
+        )
+        .unwrap();
+        base
+    }
+
+    #[test]
+    fn alias_require_over_an_installed_package_is_not_a_finding() {
+        let base = alias_project("ok");
+        let entry = write(
+            &base.join(".ptah/workflows"),
+            "main.luau",
+            "--!strict\nlocal h = require(\"@hello\")\nreturn h\n",
+        );
+        let walked = walk(&entry);
+        assert!(walked.broken.is_empty(), "{:?}", walked.broken);
+        assert_eq!(walked.parsed.len(), 2, "the package module is walked");
+        // Deep alias paths and the package's own relative requires
+        // resolve too.
+        fs::create_dir_all(base.join(".ptah/luau_packages/hello/sub")).unwrap();
+        fs::write(
+            base.join(".ptah/luau_packages/hello/sub/init.luau"),
+            "--!strict\nreturn {}\n",
+        )
+        .unwrap();
+        let entry = write(
+            &base.join(".ptah/workflows"),
+            "deep.luau",
+            "--!strict\nlocal s = require(\"@hello/sub\")\nreturn s\n",
+        );
+        let walked = walk(&entry);
+        assert!(walked.broken.is_empty(), "{:?}", walked.broken);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn undefined_alias_is_a_finding_naming_the_alias() {
+        let base = alias_project("undefined");
+        let entry = write(
+            &base.join(".ptah/workflows"),
+            "main.luau",
+            "--!strict\nlocal x = require(\"@nope\")\nreturn x\n",
+        );
+        let walked = walk(&entry);
+        assert_eq!(walked.broken.len(), 1, "{:?}", walked.broken);
+        assert!(
+            walked.broken[0].message.contains("`nope`"),
+            "names the alias: {}",
+            walked.broken[0].message
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn alias_targeting_a_missing_module_is_a_finding() {
+        let base = alias_project("missing-target");
+        fs::remove_file(base.join(".ptah/luau_packages/hello.luau")).unwrap();
+        let entry = write(
+            &base.join(".ptah/workflows"),
+            "main.luau",
+            "--!strict\nlocal x = require(\"@hello\")\nreturn x\n",
+        );
+        let walked = walk(&entry);
+        assert_eq!(walked.broken.len(), 1, "{:?}", walked.broken);
+        assert!(
+            walked.broken[0].message.contains("@hello"),
+            "{}",
+            walked.broken[0].message
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn alias_without_any_configuration_is_a_finding() {
+        let base = alias_project("no-config");
+        fs::remove_file(base.join(".luaurc")).unwrap();
+        let entry = write(
+            &base.join(".ptah/workflows"),
+            "main.luau",
+            "--!strict\nlocal x = require(\"@hello\")\nreturn x\n",
+        );
+        let walked = walk(&entry);
+        assert_eq!(walked.broken.len(), 1, "{:?}", walked.broken);
+        assert!(
+            walked.broken[0].message.contains("no .luaurc"),
+            "{}",
+            walked.broken[0].message
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn nearest_luaurc_defining_the_alias_wins() {
+        let base = alias_project("nearest");
+        // A nearer config without the alias: Luau's navigator keeps
+        // walking up, so the project root's `hello` still resolves
+        // (runtime semantics — the search is for the alias, not for
+        // any config).
+        fs::write(
+            base.join(".ptah/workflows/.luaurc"),
+            "{ \"languageMode\": \"strict\" }",
+        )
+        .unwrap();
+        let entry = write(
+            &base.join(".ptah/workflows"),
+            "main.luau",
+            "--!strict\nlocal x = require(\"@hello\")\nreturn x\n",
+        );
+        let walked = walk(&entry);
+        assert!(walked.broken.is_empty(), "{:?}", walked.broken);
+
+        // But a nearer config that *defines* the alias shadows the
+        // root's (and this one points at a missing target).
+        fs::write(
+            base.join(".ptah/workflows/.luaurc"),
+            "{ \"aliases\": { \"hello\": \"./nope\" } }",
+        )
+        .unwrap();
+        let walked = walk(&entry);
+        assert_eq!(walked.broken.len(), 1, "{:?}", walked.broken);
+        assert!(walked.broken[0].message.contains("@hello"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn mixed_case_alias_keys_resolve_like_the_runtime() {
+        // Luau lowercases both the require string's alias and the
+        // config's keys, so a mixed-case `.luaurc` key is a false
+        // finding nowhere: `@Hello` and `@hello` both resolve. The
+        // target path keeps its case (values are filesystem paths).
+        let base = alias_project("case");
+        fs::write(
+            base.join(".luaurc"),
+            r#"{ "aliases": { "Hello": "./.ptah/luau_packages/hello" } }"#,
+        )
+        .unwrap();
+        for (name, require) in [("upper.luau", "@Hello"), ("lower.luau", "@hello")] {
+            let entry = write(
+                &base.join(".ptah/workflows"),
+                name,
+                &format!("--!strict\nlocal h = require(\"{require}\")\nreturn h\n"),
+            );
+            let walked = walk(&entry);
+            assert!(walked.broken.is_empty(), "{}: {:?}", name, walked.broken);
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn jsonc_comments_do_not_break_alias_parsing() {
+        let text = "{\n  // project aliases\n  \"aliases\": {\n    /* hello */\n    \"hello\": \"./pkg/hello\"\n  }\n}\n";
+        let aliases = parse_aliases(text).unwrap();
+        assert_eq!(aliases["hello"], "./pkg/hello");
     }
 
     #[test]

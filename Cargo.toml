@@ -40,6 +40,23 @@ jsonschema = { version = "0.50", default-features = false }
 # /etc/localtime / TZ), pure Rust, wrapped behind one helper.
 jiff = { version = "0.2", default-features = false, features = ["tz-system"] }
 tempfile = "3"
+# The embedded package engine (`ptah package`). Pinned exact: pesde is
+# 0.x with breaking releases and no library-stability promise, and the
+# ptah-pesde adapter confines every pesde type behind its own API so a
+# bump touches one crate. Default features off: `patches` (the only
+# libgit2/C consumer — nobody patches ptah packages) and `wally-compat`
+# (serde_json passthrough for Wally registries we don't use) stay out,
+# keeping the tree pure Rust on this path.
+pesde = { version = "=0.7.4", default-features = false }
+# Document-preserving manifest edits: pesde's `indices` table is
+# skip_serializing, so manifest writes go through toml_edit on the raw
+# text (the same discipline pesde's own CLI follows). Version-aligned
+# with pesde's optional toml_edit dep to keep one copy in the tree.
+toml_edit = "0.23"
+# Injected into pesde's download/link driver (it takes a reqwest
+# client by design). Feature set mirrors pesde's own reqwest
+# requirements (rustls, no default features) so both share one build.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 
 # Baseline only (empty today): lint policy tightening — deny-by-default
 # sets, the dependency-direction floor — is change ③ (hexagonal-polish).

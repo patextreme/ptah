@@ -46,12 +46,47 @@ owns its own agent subprocess; closing a session reaps the process.
    `print` still passes through).
 6. Optional, when luau-lsp is available for editor/type support: run
    `ptah init` — it writes `.ptah/ptah.d.luau` (definitions matching
-   the installed binary) and a commented `.ptah/config.toml` skeleton
-   in `./.ptah/`, skipping files that already exist — then configure
+   the installed binary), a commented `.ptah/config.toml` skeleton,
+   and a `.ptah/pesde.toml` package-manifest skeleton in `./.ptah/`,
+   skipping files that already exist — then configure
    luau-lsp (platform `standard`) to use `.ptah/ptah.d.luau`.
    Definitions are workspace-wide — keep them out of mixed Luau
    projects not run under ptah. After upgrading ptah, refresh with
    `ptah types > .ptah/ptah.d.luau`.
+7. Need a workflow package (a Factory Component, a helper library)?
+   `ptah package add` installs one (see
+   [Packages](#packages-package-management)) and `ptah package
+   install --locked` restores a fresh clone's dependencies exactly.
+
+## Packages (`ptah package`)
+
+`ptah package add|remove|install|update` manage workflow packages
+with an embedded Pesde engine — no separate package manager. In a
+project (any directory under a `.ptah/` with `config.toml` or
+`pesde.toml`):
+
+```sh
+ptah package add <scope>/<name>            # registry; newest, recorded as ^x.y.z
+ptah package add --git <url> [--rev R] [--path SUBDIR]   # git source
+ptah package add --path <dir>              # local directory
+ptah package remove <alias>
+ptah package install [--locked]
+ptah package update
+```
+
+Installed packages are requirable from workflows via `@alias`
+(resolved through the project-root `.luaurc`, which ptah syncs) or by
+relative path:
+
+```lua
+--!strict
+local judge = require("@judge")
+```
+
+Commit `.ptah/pesde.toml`, `.ptah/pesde.lock`, and the root `.luaurc`;
+ignore `.ptah/luau_packages/` and `.ptah/.pesde/`. In CI or a fresh
+clone: `ptah package install --locked` (fails, exit 1, if the lockfile
+is missing or stale). Usage errors exit 2; operational failures 1.
 
 ## Script rules (the sandbox)
 

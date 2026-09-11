@@ -32,3 +32,4 @@ pub mod ask;
 pub mod bridge;
 pub mod cli;
 pub mod exec;
+pub mod package;

@@ -105,9 +105,13 @@ pub fn check(cfg: &CheckConfig) -> u8 {
     );
     findings.extend(walked.broken);
 
-    // Strict-directive lint: entry and every reachable file.
+    // Strict-directive lint: the entry and every reachable *authored*
+    // file. Generated package artifacts under a `luau_packages`
+    // directory (pesde's linker modules and container contents) are
+    // machine-written without directives and are exempt — installed
+    // packages must check clean through their aliases.
     for file in &walked.parsed {
-        if !file.strict {
+        if !file.strict && !under_luau_packages(&file.path) {
             findings.push(Finding {
                 path: file.path.clone(),
                 line: 1,
@@ -219,6 +223,13 @@ pub fn preflight(
     }
     findings.extend(interaction_findings(&walked.parsed, interaction));
     findings
+}
+
+/// Whether `path` sits under a `luau_packages` directory (ptah's
+/// generated package artifacts — exempt from the strict-directive
+/// lint, which applies to authored files).
+fn under_luau_packages(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == "luau_packages")
 }
 
 /// Interaction findings for the ask call sites in the walked graph:

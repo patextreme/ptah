@@ -4,6 +4,8 @@
 //! are expected, not drift.
 #![allow(dead_code)]
 
+pub mod pkg;
+
 /// Strip the renderer's leading `yyyy-mm-dd HH:MM:SS ` timestamp from
 /// every line of captured output so assertions can target the
 /// `[label] body` part. Lines without the prefix (script `print` output

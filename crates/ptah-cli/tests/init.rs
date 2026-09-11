@@ -1,8 +1,9 @@
 //! `ptah init` e2e: the real binary scaffolds `./.ptah` in a tempdir —
-//! exactly two files, definitions byte-identical to `ptah types`
-//! stdout, split existing-file semantics (config skipped, definitions
-//! synced: created / updated / up to date), hints on every run, and a
-//! clean failure when the target can't be written.
+//! exactly three files, definitions byte-identical to `ptah types`
+//! stdout, split existing-file semantics (configs skipped, definitions
+//! synced: created / updated / up to date), a valid package-manifest
+//! skeleton, hints on every run, and a clean failure when the target
+//! can't be written.
 
 use std::path::Path;
 use std::process::Command;
@@ -34,17 +35,23 @@ fn types_stdout() -> Vec<u8> {
 }
 
 #[test]
-fn fresh_init_creates_exactly_both_files_with_hints() {
+fn fresh_init_creates_exactly_three_files_with_hints() {
     let dir = tempfile::tempdir().unwrap();
     let (code, stdout, stderr) = init(dir.path());
     assert_eq!(code, 0, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
 
     let config = dir.path().join(".ptah").join("config.toml");
     let defs = dir.path().join(".ptah").join("ptah.d.luau");
+    let manifest = dir.path().join(".ptah").join("pesde.toml");
     assert!(config.is_file(), "config.toml not created");
     assert!(defs.is_file(), "ptah.d.luau not created");
+    assert!(manifest.is_file(), "pesde.toml not created");
     assert!(
         stdout.contains("created: .ptah/config.toml"),
+        "created line missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("created: .ptah/pesde.toml"),
         "created line missing: {stdout}"
     );
     assert!(
@@ -56,19 +63,95 @@ fn fresh_init_creates_exactly_both_files_with_hints() {
         "hints must print on a fresh run: {stdout}"
     );
 
-    // Exactly two files inside .ptah, nothing else anywhere under dir:
-    // no starter script, no editor or Luau configuration.
+    // Exactly three files inside .ptah, nothing else anywhere under
+    // dir: no starter script, no editor or Luau configuration, and
+    // nothing package-related beyond the manifest (no lockfile, no
+    // luau_packages/, no root .luaurc — init stays offline and
+    // installs nothing).
     let mut entries: Vec<String> = std::fs::read_dir(dir.path().join(".ptah"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     entries.sort();
-    assert_eq!(entries, vec!["config.toml", "ptah.d.luau"]);
+    assert_eq!(entries, vec!["config.toml", "pesde.toml", "ptah.d.luau"]);
     let top: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(top, vec![".ptah"]);
+}
+
+#[tokio::test]
+async fn manifest_skeleton_is_a_valid_private_luau_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, stdout, stderr) = init(dir.path());
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    // Parses through pesde's own deserialization via the adapter, in
+    // the project it will be used from.
+    let project = ptah_pesde::PackageProject::open(dir.path());
+    let manifest = ptah_pesde::manifest::deser_manifest(&project)
+        .await
+        .expect("skeleton parses");
+    assert!(manifest.private);
+    assert_eq!(manifest.target.kind().to_string(), "luau");
+    assert!(manifest.indices.is_empty(), "no indices in skeleton");
+    assert!(
+        manifest.dependencies.is_empty()
+            && manifest.peer_dependencies.is_empty()
+            && manifest.dev_dependencies.is_empty(),
+        "no dependencies"
+    );
+    // The name is components/<sanitized directory name>.
+    let dirname = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(
+        manifest.name.to_string(),
+        format!(
+            "components/{}",
+            ptah_pesde::manifest::sanitize_name_segment(&dirname)
+        )
+    );
+}
+
+#[test]
+fn partial_scaffold_with_configs_completes() {
+    // config.toml + pesde.toml exist, definitions missing: the defs
+    // file is created and the configs are neither modified nor
+    // clobbered.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".ptah")).unwrap();
+    let user_config = "[agents.custom]\ncommand = \"my-agent\"\n";
+    std::fs::write(dir.path().join(".ptah").join("config.toml"), user_config).unwrap();
+    let user_manifest = "name = \"mine/thing\"\nversion = \"9.9.9\"\n\n[target]\nenvironment = \"luau\"\n";
+    std::fs::write(dir.path().join(".ptah").join("pesde.toml"), user_manifest).unwrap();
+
+    let (code, stdout, stderr) = init(dir.path());
+    assert_eq!(code, 0, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("skipped (exists): .ptah/config.toml"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("skipped (exists): .ptah/pesde.toml"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("created: .ptah/ptah.d.luau"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".ptah").join("config.toml")).unwrap(),
+        user_config
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".ptah").join("pesde.toml")).unwrap(),
+        user_manifest,
+        "existing manifest must survive untouched"
+    );
 }
 
 #[test]
@@ -107,11 +190,17 @@ fn rerunning_init_reports_skips_and_is_idempotent() {
     let first_config = std::fs::read(dir.path().join(".ptah").join("config.toml")).unwrap();
     let first_defs = std::fs::read(dir.path().join(".ptah").join("ptah.d.luau")).unwrap();
 
+    let first_manifest =
+        std::fs::read(dir.path().join(".ptah").join("pesde.toml")).unwrap();
     let (code, stdout, stderr) = init(dir.path());
     assert_eq!(code, 0, "exit {code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("skipped (exists): .ptah/config.toml"),
         "config skip line missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("skipped (exists): .ptah/pesde.toml"),
+        "manifest skip line missing: {stdout}"
     );
     assert!(
         stdout.contains("up to date: .ptah/ptah.d.luau"),
@@ -125,6 +214,11 @@ fn rerunning_init_reports_skips_and_is_idempotent() {
         std::fs::read(dir.path().join(".ptah").join("config.toml")).unwrap(),
         first_config,
         "re-run must leave config.toml byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join(".ptah").join("pesde.toml")).unwrap(),
+        first_manifest,
+        "re-run must leave pesde.toml byte-identical"
     );
     assert_eq!(
         std::fs::read(dir.path().join(".ptah").join("ptah.d.luau")).unwrap(),

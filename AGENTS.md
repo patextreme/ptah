@@ -24,10 +24,14 @@ the same pin. Don't update the pin casually.
 
 ## Testing
 
-- The suite is **fully offline**: tests never spawn real agents or touch the
-  network. Integration tests (`crates/ptah-cli/tests/`) drive the in-repo
+- The suite is **fully offline**: tests never spawn real agents or touch
+  external network. Loopback test doubles are the established pattern:
+  integration tests (`crates/ptah-cli/tests/`) drive the in-repo
   mock agent (`crates/ptah-cli/src/bin/mock-agent/`), located via
-  `env!("CARGO_BIN_EXE_mock-agent")`.
+  `env!("CARGO_BIN_EXE_mock-agent")`, and the package-management suites
+  use a generated local git index plus an in-process loopback archive
+  server (`tests/common/pkg.rs`) plus local git repositories built
+  directly through gix (`ptah-pesde`'s `test-fixtures` feature).
 - Mock behavior is scripted with env vars: `MOCK_CHUNKS`, `MOCK_HANG`,
   `MOCK_PERMISSION`, `MOCK_TOOL`, `MOCK_PLAN`, `MOCK_USAGE`, `MOCK_STDERR`,
   `MOCK_DELAY_MS`, … Need a new agent behavior in a test? Extend the mock,
@@ -85,6 +89,16 @@ exceptions).
   Zero-execution: nothing here may call a compiled chunk.
 - `crates/ptah-render` — streaming output renderer (color/quiet/
   verbose modes).
+- `crates/ptah-pesde` — package management for ptah projects: the
+  embedded Pesde engine (`pesde =0.7.4`, `default-features = false` —
+  no libgit2, no wally) behind `ptah package`. Owns project discovery
+  (`.ptah/` with `config.toml` **or** `pesde.toml`), the install/
+  update/add/remove driver (the CLI-layer orchestration pesde ships
+  only as CLI code, re-implemented over public types), the `--locked`
+  staleness contract, lockfile writing, the default-registry-index
+  injection, and the root `.luaurc` alias sync. Every pesde type stays
+  behind this crate's API — pesde is 0.x with no stability promise, so
+  upgrades are deliberately a one-crate change.
 - `crates/ptah-config` — TOML agent registry: discovery and parse, the
   only `ConfigSource` impl. Project `.ptah/config.toml` (found upward
   from the invocation dir) overrides `~/.config/ptah/config.toml`
