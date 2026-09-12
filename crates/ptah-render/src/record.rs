@@ -233,6 +233,11 @@ pub struct RunRecord {
     id: RunId,
     dir: PathBuf,
     state: Mutex<RecordState>,
+    /// The first `log` write failure, stashed by the `LogWriter`. The `log`
+    /// is written by a [`Renderer`], which discards write errors (a render
+    /// never fails a run), so the writer records the first one here for the
+    /// composition root's single warning.
+    log_failure: Arc<Mutex<Option<String>>>,
 }
 
 struct RecordState {
@@ -276,7 +281,13 @@ impl RunRecord {
         }
         let id = RunId::mint(start, &runs)?;
         let dir = runs.join(id.as_str());
-        fs::create_dir(&dir)?;
+        // Build the record in a sibling temp directory and publish it with a
+        // single rename, so the run id never names a directory missing either
+        // file: an abnormal kill during creation leaves only a temp
+        // directory, never a half record under the id.
+        let tmp = runs.join(format!(".{}.tmp", id.as_str()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir(&tmp)?;
         let meta = RunMeta {
             schema_version: SCHEMA_VERSION,
             run_id: id.as_str().to_string(),
@@ -292,7 +303,17 @@ impl RunRecord {
             sessions: Vec::new(),
             asks: Vec::new(),
         };
-        let record = RunRecord {
+        // The two files must both exist before the id is visible. A failure
+        // in any step leaves no record directory under the id (only, at
+        // most, the temp directory).
+        let formed = write_meta(&tmp, &meta)
+            .and_then(|()| File::create(tmp.join("log")).map(|_| ()))
+            .and_then(|()| fs::rename(&tmp, &dir));
+        if let Err(e) = formed {
+            let _ = fs::remove_dir_all(&tmp);
+            return Err(e);
+        }
+        Ok(RunRecord {
             id,
             dir,
             state: Mutex::new(RecordState {
@@ -301,13 +322,8 @@ impl RunRecord {
                 failure: None,
                 disabled: false,
             }),
-        };
-        if let Err(e) = record.rewrite() {
-            // The unit did not form: leave no record directory behind.
-            let _ = fs::remove_dir_all(record.dir());
-            return Err(e);
-        }
-        Ok(record)
+            log_failure: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// The run id.
@@ -323,7 +339,8 @@ impl RunRecord {
     /// A renderer writing the run's rendered stream into the record's `log`,
     /// built from the terminal's verbosity but never silenced and never
     /// colored (`quiet: false`, `no_color: true`). `--quiet` governs the
-    /// terminal alone.
+    /// terminal alone. Write failures are stashed by the `LogWriter` so
+    /// [`RunRecord::take_failure`] can report them once.
     pub fn log_renderer(&self, terminal: RenderOptions) -> io::Result<Renderer> {
         let file = OpenOptions::new()
             .create(true)
@@ -334,7 +351,13 @@ impl RunRecord {
             no_color: true,
             ..terminal
         };
-        Ok(Renderer::with_writer(opts, file))
+        Ok(Renderer::with_writer(
+            opts,
+            LogWriter {
+                inner: file,
+                failure: self.log_failure.clone(),
+            },
+        ))
     }
 
     /// Record a session's readiness: label, agent name, authored invocation
@@ -391,9 +414,14 @@ impl RunRecord {
         write_meta(&self.dir, &st.meta)
     }
 
-    /// The first [`EventSink`]-path write failure, taken once. `None` when the
-    /// record has written cleanly so far.
+    /// The first record-path write failure, taken once: a `run.json` write
+    /// failure (which disables the record) or a `log` write failure stashed
+    /// by the `LogWriter`. `None` when the record has written cleanly so
+    /// far.
     pub fn take_failure(&self) -> Option<String> {
+        if let Some(reason) = self.log_failure.lock().unwrap().take() {
+            return Some(reason);
+        }
         self.state.lock().unwrap().failure.take()
     }
 
@@ -419,6 +447,47 @@ impl RunRecord {
             Err(e) => {
                 st.disabled = true;
                 st.failure = Some(e.to_string());
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Wraps the record's `log` file. A [`Renderer`] discards write and flush
+/// errors (a render must never fail a run), so this writer stashes the first
+/// one in a shared slot; the composition root drains it for the record's
+/// single warning, so a `log` that has gone unwritable is not silently
+/// truncated.
+struct LogWriter<W: Write> {
+    inner: W,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+impl<W: Write> LogWriter<W> {
+    fn record(&self, error: &io::Error) {
+        let mut slot = self.failure.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(error.to_string());
+        }
+    }
+}
+
+impl<W: Write> Write for LogWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.inner.write(buf) {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                self.record(&e);
+                Err(e)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.inner.flush() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.record(&e);
                 Err(e)
             }
         }
@@ -634,6 +703,28 @@ mod tests {
     }
 
     #[test]
+    fn create_publishes_log_and_run_json_together() {
+        // The record is built under a temp name and renamed into place, so
+        // the id never names a directory missing either file, and no temp
+        // directory survives a successful create.
+        let tmp = tempfile::tempdir().unwrap();
+        let record = record_in(tmp.path());
+        assert!(record.dir().join("log").is_file(), "log must exist");
+        assert!(
+            record.dir().join("run.json").is_file(),
+            "run.json must exist"
+        );
+        let entries: Vec<_> = fs::read_dir(tmp.path().join(".ptah/runs"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.iter().all(|n| !n.ends_with(".tmp")),
+            "no temp directory may remain: {entries:?}"
+        );
+    }
+
+    #[test]
     fn existing_ignore_file_is_preserved() {
         let tmp = tempfile::tempdir().unwrap();
         let runs = tmp.path().join(".ptah/runs");
@@ -693,6 +784,41 @@ mod tests {
         assert!(text.contains("hello from a quiet terminal"), "{text}");
         assert!(text.contains("lifecycle reaches the file"), "{text}");
         assert!(!text.contains('\u{1b}'), "no ANSI escapes: {text:?}");
+    }
+
+    /// A writer whose every write fails, for the log-failure path.
+    struct AlwaysFails;
+
+    impl Write for AlwaysFails {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn log_write_failure_is_stashed_once() {
+        let cell = Arc::new(Mutex::new(None));
+        let mut writer = LogWriter {
+            inner: AlwaysFails,
+            failure: cell.clone(),
+        };
+        assert!(writer.write_all(b"one").is_err());
+        assert!(writer.write_all(b"two").is_err());
+        assert_eq!(cell.lock().unwrap().as_deref(), Some("disk full"));
+    }
+
+    #[test]
+    fn take_failure_reports_a_log_write_failure_once() {
+        // A `log` that has gone unwritable must reach the composition root's
+        // single warning, just like a `run.json` write failure.
+        let tmp = tempfile::tempdir().unwrap();
+        let record = record_in(tmp.path());
+        *record.log_failure.lock().unwrap() = Some("disk full".into());
+        assert_eq!(record.take_failure().as_deref(), Some("disk full"));
+        assert!(record.take_failure().is_none(), "taken exactly once");
     }
 
     // -- 2.6 fan-out sink ---------------------------------------------------

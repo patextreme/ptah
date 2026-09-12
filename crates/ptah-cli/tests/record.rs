@@ -268,6 +268,42 @@ s:close()
 }
 
 #[test]
+fn spawn_failure_error_names_the_authored_command_not_the_resolved_value() {
+    // run-record "The record pins invocation shape, never secrets": the
+    // secrets rule covers the error channel too. A templated command that
+    // fails to spawn is rendered with its authored form, so the resolved
+    // path it interpolated to appears nowhere in `run.json`.
+    let project = Project::new("spawn-error-secret");
+    let script = project.script(
+        r#"
+local s = ptah.agent({ command = "${PTAH_TEST_SECRET_BIN}" }):session()
+s:close()
+"#,
+    );
+    let output = Command::new(ptah_bin())
+        .arg("run")
+        .arg(&script)
+        .arg("--no-color")
+        .current_dir(&project.dir)
+        .env_remove("PTAH_ASK")
+        .env("PTAH_TEST_SECRET_BIN", "/nonexistent/sekret-agent-binary")
+        .output()
+        .expect("run ptah");
+    let code = output.status.code().unwrap_or(-1);
+    assert_eq!(code, 1, "the spawn failure must fail the run");
+
+    let raw = std::fs::read_to_string(single_record(&project.dir).join("run.json")).unwrap();
+    assert!(
+        !raw.contains("/nonexistent/sekret-agent-binary"),
+        "a resolved inline command leaked into run.json:\n{raw}"
+    );
+    assert!(
+        raw.contains("${PTAH_TEST_SECRET_BIN}"),
+        "the authored command should be recorded instead:\n{raw}"
+    );
+}
+
+#[test]
 fn second_ask_is_recorded_ordinal_2_with_its_resolution() {
     let project = Project::new("asks");
     let script = project.script(

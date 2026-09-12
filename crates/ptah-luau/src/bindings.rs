@@ -359,6 +359,7 @@ fn new_agent_factory(
                             cwd,
                             mcp_servers,
                             label: label.clone(),
+                            authored_command: authored.command.clone(),
                             result,
                         },
                         state.sink.clone(),

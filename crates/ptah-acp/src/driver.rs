@@ -55,7 +55,13 @@ async fn start_session_inner(
     sink: Arc<dyn EventSink>,
     groups: Option<Arc<ProcessGroups>>,
 ) -> Result<SessionHandle, SessionError> {
-    let proc = process::spawn(spec, &opts.label, sink.clone(), groups.as_ref())?;
+    let proc = process::spawn(
+        spec,
+        &opts.authored_command,
+        &opts.label,
+        sink.clone(),
+        groups.as_ref(),
+    )?;
     let process::AgentProcess {
         stdin,
         stdout,

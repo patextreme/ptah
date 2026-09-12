@@ -33,6 +33,7 @@ pub(super) struct AgentProcess {
 /// sweep to miss.
 pub(super) fn spawn(
     spec: &AgentSpec,
+    authored_command: &str,
     label: &str,
     sink: Arc<dyn EventSink>,
     groups: Option<&Arc<ProcessGroups>>,
@@ -52,7 +53,10 @@ pub(super) fn spawn(
 
     let (stdin, stdout, stderr, child) = agent
         .spawn_process()
-        .map_err(|e| SessionError::Spawn(format!("`{}`: {e}", spec.command)))?;
+        // Name the *authored* command, never the resolved one: the error is
+        // rendered to the terminal and persisted in the run record, and a
+        // resolved `${VAR}` value must reach neither.
+        .map_err(|e| SessionError::Spawn(format!("`{authored_command}`: {e}")))?;
     let pid = child.id();
     if let Some(groups) = groups {
         groups.register(pid);

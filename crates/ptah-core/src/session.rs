@@ -81,7 +81,9 @@ impl std::fmt::Display for TurnError {
 /// Errors starting or closing a session.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionError {
-    /// The configured agent command could not be spawned (names the command).
+    /// The configured agent command could not be spawned (names the
+    /// *authored* command — pre-`${VAR}` interpolation — so a resolved value
+    /// never reaches a message the run record persists).
     Spawn(String),
     /// Handshake (`initialize` / `session/new`) failed.
     Handshake(String),
@@ -110,6 +112,12 @@ pub struct SessionOptions {
     pub mcp_servers: Vec<McpServer>,
     /// Attribution label, e.g. `claude/s1`.
     pub label: String,
+    /// The agent command as authored, before `${VAR}` interpolation.
+    /// Diagnostics (a spawn failure) name this instead of the resolved
+    /// command, so a resolved value cannot ride an error message into
+    /// rendered output or the run record. Callers that interpolate must set
+    /// it to the authored command; it otherwise equals `command`.
+    pub authored_command: String,
     /// Typed result contract. When set, ptah injects the result-bridge
     /// MCP server into the session. Prompt text is passed through
     /// verbatim; submit guidance lives in the `result_submit` tool
