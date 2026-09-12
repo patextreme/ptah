@@ -1,13 +1,14 @@
 --!strict
--- Shim: PR review loop over the shared library (see
--- factory-components/README.md for the consumption model). The only
--- workflow code this repo owns.
+-- Shim: PR review loop over Ptah Playbooks (the shared library,
+-- consumed as the `ptah_libs` package; see
+-- https://github.com/patextreme/ptah-libs for the consumption model).
+-- The only workflow code this repo owns.
 
-local prReview = require("../../../factory-components/components/pr-review-loop/component")
+local libs = require("@ptah_libs")
 
 local agent = ptah.agent("pi")
 
-local loop = prReview.new({
+local loop = libs.prReviewLoop.new({
 	agent = agent,
 	judgeAgent = agent,
 	sessionConfig = { { id = "model", value = "zai/glm-5.3" } },

@@ -64,11 +64,29 @@
         "type": "github"
       }
     },
+    "ptah-libs": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1789145117,
+        "narHash": "sha256-APkUAkgbB1Io0L3Ly5jIfNcdVdLaTWmyQODbfTUuwEw=",
+        "owner": "patextreme",
+        "repo": "ptah-libs",
+        "rev": "0a282f942af9da6c8b1387c2aebfff3687ee4c11",
+        "type": "github"
+      },
+      "original": {
+        "owner": "patextreme",
+        "repo": "ptah-libs",
+        "rev": "0a282f942af9da6c8b1387c2aebfff3687ee4c11",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "crane": "crane",
         "flake-parts": "flake-parts",
         "nixpkgs": "nixpkgs",
+        "ptah-libs": "ptah-libs",
         "rust-overlay": "rust-overlay"
       }
     },

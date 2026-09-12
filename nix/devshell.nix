@@ -1,4 +1,5 @@
 {
+  inputs,
   ...
 }: {
   perSystem = {
@@ -21,6 +22,11 @@
 
       RUST_SRC_PATH = "${config.rustToolchain}/lib/rustlib/src/rust/library";
       RUST_BACKTRACE = 1;
+
+      # The pinned Ptah Playbooks checkout the integration suite installs as
+      # the `ptah_libs` package (tests/ptah_libs.rs) — the flake input, so
+      # plain `cargo test` in the shell is fully offline.
+      PTAH_LIBS_SRC = "${inputs.ptah-libs}";
 
       shellHook = ''
         echo "ptah devshell: $(rustc --version)"

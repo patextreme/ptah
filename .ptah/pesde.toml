@@ -1,0 +1,30 @@
+# ptah package manifest (Pesde format; managed by `ptah package`).
+#
+# Dependencies live under [dependencies], keyed by the alias scripts
+# require them as (`require("@alias")`). ptah edits only the
+# dependency tables — everything else in this file is yours.
+#
+# Usually you add packages with commands, not by hand:
+#
+#   ptah package add <scope>/<name>          from the default registry
+#   ptah package add --git <url> --rev <rev> from a git repository
+#   ptah package add --path ../local-pkg     from a local directory
+#
+# The default registry index is supplied by ptah at resolve time; add
+# an [indices] table only to override it:
+#
+#   [indices]
+#   default = "https://github.com/pesde-pkg/index"
+
+name = "components/ptah"
+version = "0.1.0"
+private = true
+
+[target]
+environment = "luau"
+
+[dependencies]
+
+[dependencies.ptah_libs]
+repo = "https://github.com/patextreme/ptah-libs"
+rev = "main"

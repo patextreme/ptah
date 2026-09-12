@@ -6,3 +6,5 @@
 .work
 .pi/taskflows
 *.log
+.ptah/luau_packages/
+.ptah/.pesde/

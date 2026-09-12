@@ -1,7 +1,8 @@
 --!strict
--- Shim: openspec lifecycle (groom/implement/verify) over the shared
--- library (see factory-components/README.md for the consumption
--- model). The only workflow code this repo owns.
+-- Shim: openspec lifecycle (groom/implement/verify) over Ptah Playbooks
+-- (the shared library, consumed as the `ptah_libs` package; see
+-- https://github.com/patextreme/ptah-libs for the consumption model).
+-- The only workflow code this repo owns.
 --
 -- ptah scripts take no runtime arguments, so the op and change name
 -- are hand-edited per use; one call active at a time.
@@ -9,8 +10,8 @@
 local piAgent = ptah.agent("pi")
 
 -- COMPONENTS
-local openspec = require("../../../factory-components/components/openspec/component")
-local opsx = openspec.new({
+local libs = require("@ptah_libs")
+local opsx = libs.openspec.new({
 	agent = piAgent,
 	judgeAgent = piAgent,
 	sessionConfig = { { id = "model", value = "zai/glm-5.3" } },

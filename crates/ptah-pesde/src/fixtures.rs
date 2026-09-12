@@ -18,6 +18,10 @@ pub struct GitFixture {
     pub dir: std::path::PathBuf,
     /// The tip commit id of `main`.
     pub head: gix::ObjectId,
+    /// The root tree id of the tip commit. Exposed so callers can compare a
+    /// fixture's content against an externally recorded tree id (e.g. a
+    /// pesde lockfile's `tree_id`) without peeling the commit themselves.
+    pub tree_id: gix::ObjectId,
 }
 
 /// One file in a fixture repository tree.
@@ -146,6 +150,7 @@ pub fn git_repo_with(dir: &Path, files: &[FileSpec<'_>], branch: &str) -> GitFix
     GitFixture {
         dir: dir.to_path_buf(),
         head: commit,
+        tree_id,
     }
 }
 

@@ -17,6 +17,11 @@ ptah check .ptah/workflows/<name>/main.luau
 ptah run .ptah/workflows/<name>/main.luau
 ```
 
-The shared Factory Components library is kept at `factory-components/` in this
-repository. Workflow entrypoints reach it with a relative require such as
-`require("../../../factory-components/components/<component>/component")`.
+The shared workflow library is [Ptah Playbooks](https://github.com/patextreme/ptah-libs),
+consumed as the `ptah_libs` package (declared in `.ptah/pesde.toml`, installed
+under `.ptah/luau_packages/`). Workflow entrypoints reach it through the
+package alias:
+
+```lua
+local libs = require("@ptah_libs")
+```

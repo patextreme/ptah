@@ -1,68 +1,22 @@
 # ptah
 
 A Luau-based CLI that drives ACP-speaking AI agents headlessly. This glossary
-covers the ptah context: the CLI, the workflow scripts, and the shared
-workflow library.
+covers the ptah context: the CLI, the workflow scripts, and Ptah Playbooks
+(the shared workflow library).
 
 ## Language
 
-**Factory Components**:
-The shared workflow library maintained in this repo, consumable by any
-repository. Units of it are stdlib helpers and Components.
-_Avoid_: shared-workflow, bricks, lego, software factory
-
-**stdlib**:
-The repo-agnostic helper layer of Factory Components — transport, typed
-judging, retry, and loop machinery. Knows nothing about any consumer repo.
-_Avoid_: utils, lib, common
-
-**Component**:
-A reusable workflow capability that consumers compose and configure rather
-than fork — e.g. an openspec lifecycle or a PR review loop.
-_Avoid_: template, plugin, module (module means any Luau file)
-
-**Convergence loop**:
-The core workflow pattern: prompt an agent, judge the result with a typed
-predicate, and repeat with fixes until the predicate holds or the loop
-escalates to a human.
-_Avoid_: review loop, retry loop (those name specific uses of the pattern)
-
-**Shim**:
-The thin consumer-owned entry script that mounts Factory Components and hands
-it Local config. The only workflow code a consumer repo owns.
-_Avoid_: wrapper, bootstrap
-
-**Local config**:
-The data-only configuration table a consumer repo passes into a Component or
-stdlib call. Functions are not configuration.
-_Avoid_: settings, options file
-
-**Task scope**:
-The per-call description of which tasks an implement run is responsible
-for. Completion — and the convergence loop's acceptance — is judged
-against the scope, not against the whole change.
-_Avoid_: filter (the component cannot see the tasks), instruction (a
-scope redefines completion; an instruction does not)
-
-**Session config**:
-The ordered list of `(id, value)` entries a component applies to every
-session it creates, via `setConfig`, in declared order — the consumer's
-`setConfig` sequence as data. Order is load-bearing for agents with
-dependent options.
-_Avoid_: model config (model is one entry, not the concept); config
-table (a table cannot carry order)
-
-**Reviewer instruction**:
-The text that tells the work agent how to review — a configured instruction
-in Local config, or the component's built-in default. A long or repo-pinned
-one points at a versioned document rather than inlining text.
-_Avoid_: instruction document, review instruction, prompt
+**Ptah Playbooks**:
+The shared Luau workflow library (`ptah-libs`, github.com/patextreme/ptah-libs):
+repo-agnostic stdlib helpers and composable playbooks, consumed as the
+`ptah_libs` package. Its vocabulary lives in that repository's `CONTEXT.md`.
+_Avoid_: Factory Components (the retired name), shared-workflow, bricks, lego
 
 **Package**:
-A versioned distribution of Factory Components material (components and/or
+A versioned distribution of Ptah Playbooks material (playbooks and/or
 stdlib modules) installed by `ptah package` commands into a project. A
-package carries components; the CLI noun is package, never component.
-_Avoid_: component (that names the capability inside), dependency, bundle
+package carries playbooks; the CLI noun is package, never playbook.
+_Avoid_: playbook (that names the capability inside), dependency, bundle
 
 **Package alias**:
 The `@name` a workflow uses to require an installed package. Synced by
@@ -71,10 +25,10 @@ consumer (runtime, `ptah check`, editors) with standard Luau semantics.
 _Avoid_: import, module name, package name (that is `scope/name` on the registry)
 
 **Mount point**:
-The location in a consumer repo where the Factory Components tree is made
-available (symlink, submodule, vendored copy, or installed packages).
-Library code only requires within its own tree, so the mount point is the
-consumer's free choice.
+The location in a consumer repo where a workflow library is made available
+(an installed package, or a source mount via symlink, submodule, or
+vendored copy). Library code only requires within its own tree, so the
+mount point is the consumer's free choice.
 _Avoid_: vendor dir (that is one mounting mechanism, not the concept)
 
 **Source definitions**:

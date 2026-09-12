@@ -203,30 +203,39 @@ any agent subprocess spawns.)
   stderr). Always `await()`/`join()` your tasks, or handle their outcome
   entries.
 
-## Factory Components (the shared workflow library)
+## Ptah Playbooks (the shared workflow library)
 
 Before hand-rolling a review loop, a typed judge, a `gh` transport, or
-a repo fan-out daemon, check the bundled library under
-`factory-components/` (in the ptah repo; consumer repos mount it as
-source — nix flake input + symlink, submodule, or vendored copy):
+a repo fan-out daemon, use
+[Ptah Playbooks](https://github.com/patextreme/ptah-libs) (`ptah-libs`),
+installed as a pesde git dependency via `ptah package`:
 
-- `std/predicate` — typed boolean judge (bounded retry; no verdict is a
+```sh
+ptah package add --git https://github.com/patextreme/ptah-libs --rev <tag> --as ptah_libs
+```
+
+Exports:
+
+- `std.predicate` — typed boolean judge (bounded retry; no verdict is a
   script error, never a hang)
-- `std/gh` — GitHub CLI transport over `ptah.exec` (structured
+- `std.gh` — GitHub CLI transport over `ptah.exec` (structured
   outcomes, never raises for a failed command, POSIX-safe quoting)
-- `std/daemon` — per-repo loop with error isolation (sequential or
+- `std.daemon` — per-repo loop with error isolation (sequential or
   bounded parallel)
-- `components/openspec` — groom/implement/verify an openspec change
-- `components/pr-review-loop` — review→fix→push convergence on a PR
+- `std.sessionConfig` — ordered session-config entries, applied in order
+- `std.escalate` — ask transport (outcome as data: respond / abort /
+  unavailable)
+- `openspec` — groom/implement/verify an openspec change
+- `prReviewLoop` — convergent review→fix→push loop on a PR
 
 Consumption is a **shim** — the only workflow code the consumer repo
 owns:
 
 ```lua
 --!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local libs = require("@ptah_libs")
 
-local ops = openspec.new({
+local ops = libs.openspec.new({
 	agent = ptah.agent("claude"),       -- work agent handle
 	judgeAgent = ptah.agent("claude"),  -- judge agent handle
 	sessionConfig = { { id = "model", value = "claude-opus-4-5" } },
@@ -236,15 +245,13 @@ local ops = openspec.new({
 ops:groom("add-auth")
 ```
 
-Rules of the contract: mount the tree anywhere (requires are relative
-and the library never requires out of its tree, so the mount point is
-free — a read-only store path works); config is data plus declared
-ptah runtime handles where the component's config type declares them
-(`agent: Agent`; functions are not configuration) and per-call data
-(change name, PR URL) is a method argument; `ptah check` on the shim is the compatibility gate —
-component `Config` types are strict, so a mistyped field is a type
-error naming the field. See the ptah repo's `factory-components/`
-README and each component's README for environment requirements.
+Rules of the contract: config is data plus declared ptah runtime handles
+where the playbook's config type declares them (`agent: Agent`; functions
+are not configuration) and per-call data (change name, PR URL) is a
+method argument; `ptah check` on the shim is the compatibility gate —
+playbook `Config` types are strict, so a mistyped field is a type error
+naming the field. See the Ptah Playbooks README and each playbook's
+README for environment requirements.
 
 ## Patterns
 

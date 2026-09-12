@@ -1,12 +1,15 @@
-//! The bundled Factory Components library (`factory-components/`) runs
-//! green against the mock agent: every stdlib module and component entry
-//! point is exercised offline — the library is mounted into a generated
-//! project exactly like a consumer repo would mount it (copy at an
-//! arbitrary path + thin shim), so the tests double as the consumption
-//! model's regression suite. No network, no real agent.
+//! The pinned Ptah Playbooks library (`ptah-libs`) runs green against the
+//! mock agent: every stdlib module and playbook entry point is exercised
+//! offline. Each test builds a generated consumer project that installs the
+//! library as the `ptah_libs` package from `PTAH_LIBS_SRC` (the flake-pinned
+//! checkout the dev shell and the nix derivations export) — the real
+//! consumption model — so the tests double as its regression suite. No
+//! network, no real agent.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+mod common;
 
 fn ptah_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ptah")
@@ -16,16 +19,31 @@ fn mock_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mock-agent")
 }
 
-/// The library tree as it ships in this repo (the same tree the flake
-/// keeps in the build source, so the sandbox runs these paths too).
+/// The pinned library checkout: the `ptah-libs` flake input, exported as
+/// `PTAH_LIBS_SRC` by the dev shell and the nix derivations. A hard failure
+/// when absent — the suite cannot run without the library, and a silent skip
+/// would hide exactly the regression it exists to catch.
 fn library_src() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../factory-components")
+    std::env::var_os("PTAH_LIBS_SRC").map(PathBuf::from).expect(
+        "PTAH_LIBS_SRC is not set: run the suite inside `nix develop` \
+         (the dev shell exports the pinned ptah-libs checkout)",
+    )
+}
+
+/// A minimal valid manifest for a generated project (the package name
+/// segment is capped at pesde's 32-character limit).
+fn manifest_skeleton(name: &str) -> String {
+    let segment: String = name.replace('-', "_").chars().take(32).collect();
+    format!(
+        "name = \"components/{segment}\"\nversion = \"0.1.0\"\nprivate = true\n\n[target]\nenvironment = \"luau\"\n"
+    )
 }
 
 /// A generated consumer project: a temp dir with a `.ptah/config.toml`
-/// mapping the mock agent under several names (per-role env scripting),
-/// and a copy of the library mounted at `vendor/factory-components` —
-/// an arbitrary mount point, proving the tree is location-agnostic.
+/// mapping the mock agent under several names (per-role env scripting) and
+/// the pinned library installed as the `ptah_libs` package (path source —
+/// fully offline). Shims require the package through the root `.luaurc`
+/// alias, exactly as a real consumer would.
 struct Project {
     dir: PathBuf,
 }
@@ -85,9 +103,26 @@ impl Project {
         write_agent(&mut config, "pi");
         std::fs::write(dir.join(".ptah").join("config.toml"), config).unwrap();
 
-        // Mount the library: a plain copy at an arbitrary path.
-        let mounted = dir.join("vendor/factory-components");
-        copy_tree(&library_src(), &mounted).unwrap();
+        // Install the pinned library as the `ptah_libs` package: a path
+        // source is fully offline (no registry, no git) and exercises the
+        // same package machinery a consumer uses. The root `.luaurc` and
+        // `.ptah/luau_packages/` appear as the install's output.
+        std::fs::write(dir.join(".ptah/pesde.toml"), manifest_skeleton(name)).unwrap();
+        let output = Command::new(ptah_bin())
+            .args(["package", "add", "--path"])
+            .arg(library_src())
+            .args(["--as", "ptah_libs"])
+            .current_dir(&dir)
+            .env("HOME", &dir)
+            .env_remove("XDG_CONFIG_HOME")
+            .output()
+            .expect("run ptah package add");
+        assert!(
+            output.status.success(),
+            "installing ptah_libs failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         Self { dir }
     }
@@ -172,21 +207,6 @@ impl Project {
     }
 }
 
-fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
 /// which-style scan for an executable `luau-lsp` on PATH (the same rule
 /// ptah itself uses to find the analyzer).
 #[cfg(unix)]
@@ -217,7 +237,7 @@ fn predicate_returns_the_submitted_verdict() {
     let script = p.write(
         "main.luau",
         "--!strict\n\
-         local predicate = require(\"./vendor/factory-components/std/predicate\")\n\
+         local predicate = require(\"@ptah_libs\").std.predicate\n\
          local verdict = predicate(\n\
          \t\"The payload mentions ptah\",\n\
          \t\"ptah drives agents\",\n\
@@ -240,7 +260,7 @@ fn predicate_no_verdict_is_a_bounded_script_error() {
     let script = p.write(
         "main.luau",
         "--!strict\n\
-         local predicate = require(\"./vendor/factory-components/std/predicate\")\n\
+         local predicate = require(\"@ptah_libs\").std.predicate\n\
          predicate(\"p\", \"payload\", { agent = ptah.agent(\"judge\"), sessionId = \"judge-x\", maxAttempts = 3 })\n",
     );
     let (code, _stdout, stderr) = p.run(&script, &["--quiet"]);
@@ -273,7 +293,7 @@ fn predicate_session_config_reaches_the_judge_session_in_declared_order() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local predicate = require("./vendor/factory-components/std/predicate")
+local predicate = require("@ptah_libs").std.predicate
 local judge = ptah.agent("judge")
 local inOrder = predicate("p", "payload", {
 	agent = judge,
@@ -332,7 +352,7 @@ fn session_config_entries_apply_in_declared_order() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local sessionConfig = require("./vendor/factory-components/std/session-config")
+local sessionConfig = require("@ptah_libs").std.sessionConfig
 local agent = ptah.agent("demo")
 
 local ordered = agent:session({ id = "ordered" })
@@ -370,7 +390,7 @@ fn session_config_nil_or_empty_entries_are_a_noop() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local sessionConfig = require("./vendor/factory-components/std/session-config")
+local sessionConfig = require("@ptah_libs").std.sessionConfig
 local s = ptah.agent("demo"):session({ id = "noop" })
 sessionConfig.apply(s, nil)
 sessionConfig.apply(s, {})
@@ -402,7 +422,7 @@ fn session_config_duplicate_ids_apply_verbatim_last_wins() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local sessionConfig = require("./vendor/factory-components/std/session-config")
+local sessionConfig = require("@ptah_libs").std.sessionConfig
 local s = ptah.agent("demo"):session({ id = "dupes" })
 sessionConfig.apply(s, { { id = "model", value = "haiku" }, { id = "model", value = "opus" } })
 local o = s:configOptions()
@@ -435,7 +455,7 @@ fn session_config_agent_rejection_raises_the_set_config_error() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local sessionConfig = require("./vendor/factory-components/std/session-config")
+local sessionConfig = require("@ptah_libs").std.sessionConfig
 local s = ptah.agent("demo"):session({ id = "rej" })
 -- The wrapper's return type gives pcall a second value to type-check
 -- against (apply returns nothing; the runtime error object is the
@@ -521,7 +541,7 @@ fn gh_success_returns_parsed_json_and_trims_output() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local gh = require("./vendor/factory-components/std/gh")
+local gh = require("@ptah_libs").std.gh
 local o = gh.run({ "pr", "view", "6" }, { json = true })
 print(("ok=%s exit=%s n=%s title=%s"):format(tostring(o.ok), tostring(o.exitCode), tostring(o.json.number), tostring(o.json.title)))
 print("stdout=[" .. o.stdout .. "]")
@@ -547,7 +567,7 @@ fn gh_failure_is_data_not_an_error() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local gh = require("./vendor/factory-components/std/gh")
+local gh = require("@ptah_libs").std.gh
 local o = gh.run({ "pr", "view", "999", "--fail" }, { json = true })
 print(("ok=%s exit=%s json=%s"):format(tostring(o.ok), tostring(o.exitCode), tostring(o.json)))
 print("stderr:" .. o.stderr)
@@ -568,7 +588,7 @@ fn gh_quotes_arguments_verbatim() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local gh = require("./vendor/factory-components/std/gh")
+local gh = require("@ptah_libs").std.gh
 local o = gh.run({ "echo-args", "two words", "it's quoted", "a'b'c" })
 print(o.stdout)
 "#,
@@ -597,7 +617,7 @@ fn daemon_shim(p: &Project, concurrency: Option<u8>) -> PathBuf {
         "main.luau",
         &format!(
             r#"--!strict
-local daemon = require("./vendor/factory-components/std/daemon")
+local daemon = require("@ptah_libs").std.daemon
 local outcomes = daemon.each({{ "a", "b", "c" }}, function(repo: string)
 	if repo == "b" then
 		error("repo b is on fire")
@@ -663,7 +683,7 @@ fn openspec_shim(p: &Project, op: &str) -> PathBuf {
         "main.luau",
         &format!(
             r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 local ops = openspec.new({{
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -736,7 +756,7 @@ fn openspec_component_implements_a_scoped_change() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 local ops = openspec.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -789,7 +809,7 @@ fn openspec_component_implements_an_unresolvable_scope_fails() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 local ops = openspec.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -869,7 +889,7 @@ fn openspec_component_iteration_cap_fails() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 local ops = openspec.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -919,7 +939,7 @@ fn openspec_work_and_archive_sessions_receive_session_config() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 local ops = openspec.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -963,7 +983,7 @@ print("verify-ok:" .. text)
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 local ops = openspec.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -998,14 +1018,14 @@ fn openspec_judge_and_probe_sessions_receive_judge_session_config() {
         ("MOCK_CONFIG_DEPENDENT", "1"),
         ("MOCK_SUBMIT_MATCH", rules),
     ];
-    let shim = |sessionConfigLine: &str, maxIters: &str| {
+    let shim = |session_config_line: &str, max_iters: &str| {
         format!(
             r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 local ops = openspec.new({{
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
-{sessionConfigLine}	maxIterations = {maxIters},
+{session_config_line}	maxIterations = {max_iters},
 }})
 local text = ops:implement("demo-change")
 print("implement-ok:" .. tostring(text ~= nil))
@@ -1035,7 +1055,7 @@ print("implement-ok:" .. tostring(text ~= nil))
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 local ops = openspec.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -1068,277 +1088,404 @@ ops:groom("demo-change")
 }
 
 // ---------------------------------------------------------------------
-// components/pr-review-loop — review→fix→push convergence
+// playbooks/pr-review-loop — convergent review→fix→push loop
 // ---------------------------------------------------------------------
 
-#[test]
-fn pr_review_loop_converges_review_fix_push() {
-    // Default mode (no `reviewInstruction` — this repo's own
-    // dogfood configuration): the loop runs against the built-in
-    // default instruction. Judge rules: the second review pass passes
-    // (the fix landed), the escalation predicate never needs a human,
-    // everything else fails — so the loop runs review → fix → push and
-    // converges. The push prompt must reach the agent (the mock echoes
-    // prompts back), and the echoed review prompt must carry the
-    // default's classification directive (uppercase BLOCKING — the
-    // component's own ask is lowercase, so only the inlined default
-    // text can match).
-    let p = Project::new(
-        "pr-review-loop",
-        &[("MOCK_SUBMIT_MATCH", &converges_on_second_pass())],
-    );
-    let script = p.write(
+/// A stub `gh` for the loop's ledger transport: an empty comment list (no
+/// ledger yet — the discovery pass), create/update endpoints, and a fixed
+/// PR head SHA. No network, no state.
+fn stub_gh_pr(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "ptah-ghpr-{}-{name}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let stub = dir.join("gh");
+    std::fs::write(
+        &stub,
+        r#"#!/bin/sh
+# The review loop's gh surface: comment list/create/update + PR head.
+case "$1" in
+  api)
+    method=GET
+    prev=""
+    for arg in "$@"; do
+      [ "$prev" = "--method" ] && method="$arg"
+      prev="$arg"
+    done
+    if [ "$method" = "POST" ] || [ "$method" = "PATCH" ]; then
+      printf '{"id": 1}'
+    else
+      printf '[]'
+    fi
+    ;;
+  pr)
+    case "$*" in
+      *"title,body"*) printf '{"title":"Test PR","body":"Add a feature.","headRefOid":"cafe1234","commits":[]}' ;;
+      *) printf '{"headRefOid":"cafe1234"}' ;;
+    esac
+    ;;
+  *) printf '{}' ;;
+esac
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+/// A judge ruleset filing one blocking finding on the first pass and
+/// resolving it on the second — the fix-then-converge shape. The judge
+/// prompt embeds the review prose (the work prompt echoed back), so the
+/// iteration header distinguishes the passes.
+fn pr_review_converges_after_fix() -> String {
+    r#"[{"match":"iteration 2","value":{"findings":[],"priorFindingsStatus":[{"id":"f1","status":"resolved","evidence":"fixed in cafe1234"}]}},{"match":"","value":{"findings":[{"severity":"blocking","family":"bugs","validation":"validated","needsHuman":false,"status":"open","title":"off-by-one"}],"priorFindingsStatus":[]}}]"#.to_string()
+}
+
+/// The pr-review shim: `config` is the constructor's extra config lines
+/// (already indented); the run prints the outcome status and verdict.
+fn pr_review_shim(p: &Project, config: &str) -> PathBuf {
+    p.write(
         "main.luau",
-        r#"--!strict
-local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
-local loop = prReview.new({
+        &format!(
+            r#"--!strict
+local libs = require("@ptah_libs")
+local loop = libs.prReviewLoop.new({{
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
-})
-local text = loop:review("https://github.com/example/example/pull/6")
-print("review-ok:" .. tostring(text ~= nil))
-"#,
+{config}}})
+local outcome = loop:review("https://github.com/example/example/pull/6")
+print("status=" .. outcome.status)
+print("verdict=" .. outcome.verdict)
+"#
+        ),
+    )
+}
+
+#[test]
+fn pr_review_loop_converges_after_a_fix_and_push() {
+    // The judge files a blocking finding on the discovery pass and
+    // resolves it on the second: the loop reviews, fixes, pushes, and
+    // converges — the fix and push prompts must reach the agent, and the
+    // converged session posts the verdict comment.
+    let p = Project::new(
+        "pr-review-converge",
+        &[("MOCK_SUBMIT_MATCH", &pr_review_converges_after_fix())],
     );
-    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
+    let script = pr_review_shim(&p, "");
+    let (code, stdout, stderr) = p.run_with_path(&script, &stub_gh_pr("converge"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("review-ok:true"), "stdout: {stdout}");
+    assert!(stdout.contains("status=converged"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("Resolve all of the following blocking findings"),
+        "the fix prompt must reach the agent, stdout: {stdout}"
+    );
     assert!(
         stdout.contains("push them to the PR branch"),
         "the fix must be followed by the push prompt, stdout: {stdout}"
     );
     assert!(
-        stdout.contains("BLOCKING"),
-        "the built-in default instruction (classification directive) must reach the agent, stdout: {stdout}"
+        stdout.contains("Post a comment on pull request"),
+        "the converged session must post the verdict comment, stdout: {stdout}"
     );
 }
 
 #[test]
 fn pr_review_loop_dry_run_never_pushes_but_still_comments() {
-    // Same judge rules as the push test (converge on the second pass),
-    // with the dry-run gate on: the loop reviews, fixes, and converges,
-    // but the commit-and-push prompt must never reach the agent — while
-    // the converged session still posts the verdict comment (dry-run
-    // gates the branch, not the PR conversation; see the README).
+    // The dry-run gate skips the commit-and-push step, but the converged
+    // session still posts the verdict comment (dry-run gates the branch,
+    // not the PR conversation).
     let p = Project::new(
         "pr-review-dry-run",
-        &[("MOCK_SUBMIT_MATCH", &converges_on_second_pass())],
+        &[("MOCK_SUBMIT_MATCH", &pr_review_converges_after_fix())],
     );
-    let script = p.write(
-        "main.luau",
-        r#"--!strict
-local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
-local loop = prReview.new({
-	agent = ptah.agent("demo"),
-	judgeAgent = ptah.agent("judge"),
-	dryRun = true,
-})
-local text = loop:review("https://github.com/example/example/pull/6")
-print("review-ok:" .. tostring(text ~= nil))
-"#,
-    );
-    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
+    let script = pr_review_shim(&p, "\tdryRun = true,\n");
+    let (code, stdout, stderr) = p.run_with_path(&script, &stub_gh_pr("dry-run"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("review-ok:true"), "stdout: {stdout}");
+    assert!(stdout.contains("status=converged"), "stdout: {stdout}");
     assert!(
         !stdout.contains("push them to the PR branch"),
         "dry-run must never send the commit-and-push prompt, stdout: {stdout}"
     );
     assert!(
-        stdout.contains("Please comment on the PR with the review feedback along with the verdict"),
+        stdout.contains("Post a comment on pull request"),
         "the converged session still posts the verdict comment in dry-run, stdout: {stdout}"
     );
 }
 
 #[test]
 fn pr_review_loop_configured_instruction_wins_over_default() {
-    // Replace semantics: test-authored instruction text is
-    // configured via `reviewInstruction`; the text must be inlined
-    // into the echoed review prompt, while the built-in default's
-    // classification directive (uppercase BLOCKING) must not appear —
-    // a configured instruction fully replaces the default (the
-    // test's own text deliberately avoids the uppercase directive,
-    // so only the inlined default could match it).
+    // A configured `reviewInstruction` fully replaces the built-in persona
+    // (only nil selects the default), so the configured text is inlined
+    // and the default's opening line never appears.
     let p = Project::new(
-        "pr-review-instruction-wins",
-        &[("MOCK_SUBMIT_MATCH", &converges_on_second_pass())],
+        "pr-review-instruction",
+        &[("MOCK_SUBMIT_MATCH", &pr_review_converges_after_fix())],
     );
-    let script = p.write(
-        "main.luau",
-        r#"--!strict
-local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
-local loop = prReview.new({
-	agent = ptah.agent("demo"),
-	judgeAgent = ptah.agent("judge"),
-	reviewInstruction = "Review for correctness first. Judge each finding against this repository's severity ladder and label it blocking or non-blocking.",
-})
-local text = loop:review("https://github.com/example/example/pull/6")
-print("review-ok:" .. tostring(text ~= nil))
-"#,
+    let script = pr_review_shim(
+        &p,
+        "\treviewInstruction = \"Review for correctness first and label each finding blocking or non-blocking.\",\n",
     );
-    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
+    let (code, stdout, stderr) =
+        p.run_with_path(&script, &stub_gh_pr("instruction"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("review-ok:true"), "stdout: {stdout}");
     assert!(
         stdout.contains(
-            "Review for correctness first. Judge each finding against this repository's severity ladder and label it blocking or non-blocking."
+            "Review for correctness first and label each finding blocking or non-blocking."
         ),
         "the configured instruction text must be inlined into the review prompt, stdout: {stdout}"
     );
     assert!(
-        !stdout.contains("BLOCKING"),
+        !stdout.contains("You are a code reviewer"),
         "the built-in default must not be inlined when an instruction is configured, stdout: {stdout}"
     );
 }
 
 #[test]
 fn pr_review_loop_work_sessions_receive_session_config() {
-    // Same echo mechanism as the openspec work-session scenario: the
-    // per-iteration work session (which also posts the verdict comment)
-    // carries the applied effort value in its replies; a session
-    // missing its entries would leak the seeded default.
+    // The work agent echoes its live effort value (MOCK_CONFIG_ECHO); the
+    // judge converges immediately, so the returned verdict is that echo —
+    // `high` only when the entries were applied in declared order on the
+    // freshly created session.
     let demo_env: Vec<(&str, &str)> = vec![
         ("MOCK_CONFIG_OPTIONS", CONFIG_OPTIONS_JSON),
         ("MOCK_CONFIG_DEPENDENT", "1"),
         ("MOCK_CONFIG_ECHO", "effort"),
     ];
-    let judge_env: Vec<(&str, &str)> =
-        vec![("MOCK_SUBMIT_MATCH", r#"[{"match":"","value":true}]"#)];
-    let shim = |sessionConfigLine: &str| {
-        format!(
-            r#"--!strict
-local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
-local loop = prReview.new({{
-	agent = ptah.agent("demo"),
-	judgeAgent = ptah.agent("judge"),
-{sessionConfigLine}}})
-local text = loop:review("https://github.com/example/example/pull/6")
-print("review-ok:" .. text)
-"#
-        )
-    };
+    let judge_env: Vec<(&str, &str)> = vec![(
+        "MOCK_SUBMIT_MATCH",
+        r#"[{"match":"","value":{"findings":[],"priorFindingsStatus":[]}}]"#,
+    )];
 
     let p = Project::new_agents(
         "pr-review-config-work",
         &[("demo", &demo_env), ("judge", &judge_env)],
     );
-    let script = p.write(
-        "main.luau",
-        &shim("\tsessionConfig = { { id = \"model\", value = \"haiku\" }, { id = \"effort\", value = \"high\" } },\n"),
+    let script = pr_review_shim(
+        &p,
+        "\tsessionConfig = { { id = \"model\", value = \"haiku\" }, { id = \"effort\", value = \"high\" } },\n",
     );
-    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
+    let (code, stdout, stderr) =
+        p.run_with_path(&script, &stub_gh_pr("config-work"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
-        stdout.contains("review-ok:high"),
+        stdout.contains("verdict=high"),
         "the work session must receive the entries in declared order, stdout: {stdout}"
-    );
-    assert!(
-        !stdout.contains("] low"),
-        "the work session must not leak the seeded default, stdout:\n{stdout}"
     );
 
     let p = Project::new_agents(
         "pr-review-config-work-reversed",
         &[("demo", &demo_env), ("judge", &judge_env)],
     );
-    let script = p.write(
-        "main.luau",
-        &shim("\tsessionConfig = { { id = \"effort\", value = \"high\" }, { id = \"model\", value = \"haiku\" } },\n"),
+    let script = pr_review_shim(
+        &p,
+        "\tsessionConfig = { { id = \"effort\", value = \"high\" }, { id = \"model\", value = \"haiku\" } },\n",
     );
-    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
+    let (code, stdout, stderr) =
+        p.run_with_path(&script, &stub_gh_pr("config-work-rev"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
-        stdout.contains("review-ok:low"),
+        stdout.contains("verdict=low"),
         "reversed entries must re-derive effort on the work session, stdout: {stdout}"
     );
 }
 
 #[test]
-fn pr_review_loop_judge_and_probe_sessions_receive_judge_session_config() {
-    // The review judge and the escalation-probe judge are both gated on
-    // their session's live effort value: entries forwarded through
-    // judgeSessionConfig must reach each freshly created predicate
-    // session in declared order before its prompt.
-    let rules = r#"[{"match":"does not contain blocking issues","value":true,"requiresConfig":{"effort":"high"}},{"match":"Human input is required","value":true,"requiresConfig":{"effort":"high"}},{"match":"","value":false}]"#;
+fn pr_review_loop_judge_sessions_receive_judge_session_config() {
+    // The judge's accept is gated on the judge session's live effort
+    // value: forwarded entries reach the freshly created session in
+    // declared order before its prompt.
+    let rules = r#"[{"match":"","value":{"findings":[],"priorFindingsStatus":[]},"requiresConfig":{"effort":"high"}},{"match":"","value":{"findings":[{"severity":"blocking","family":"bugs","validation":"validated","needsHuman":false,"status":"open","title":"bug"}],"priorFindingsStatus":[]}}]"#;
     let judge_env: Vec<(&str, &str)> = vec![
         ("MOCK_CONFIG_OPTIONS", CONFIG_OPTIONS_JSON),
         ("MOCK_CONFIG_DEPENDENT", "1"),
         ("MOCK_SUBMIT_MATCH", rules),
     ];
 
-    // Review judge session: gated accept fires only on a configured
-    // session — the loop converges on the first pass.
     let p = Project::new_agents("pr-review-config-judge", &[("judge", &judge_env)]);
+    let script = pr_review_shim(
+        &p,
+        "\tjudgeSessionConfig = { { id = \"model\", value = \"haiku\" }, { id = \"effort\", value = \"high\" } },\n\tmaxIterations = 2,\n",
+    );
+    let (code, stdout, stderr) =
+        p.run_with_path(&script, &stub_gh_pr("config-judge"), &["--no-color"]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("status=converged"),
+        "the gated accept must fire on a configured judge session, stdout: {stdout}"
+    );
+
+    let p = Project::new_agents("pr-review-config-judge-rev", &[("judge", &judge_env)]);
+    let script = pr_review_shim(
+        &p,
+        "\tjudgeSessionConfig = { { id = \"effort\", value = \"high\" }, { id = \"model\", value = \"haiku\" } },\n\tmaxIterations = 2,\n",
+    );
+    let (code, stdout, stderr) =
+        p.run_with_path(&script, &stub_gh_pr("config-judge-rev"), &["--no-color"]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("status=non-converged"),
+        "reversed entries must not satisfy the judge gate, stdout: {stdout}"
+    );
+}
+
+#[test]
+fn pr_review_loop_needs_human_fails_without_a_provider() {
+    // A judge finding flagged `needsHuman` routes through std/escalate; with
+    // no ask provider the ask classifies `unavailable` and the loop fails
+    // with the human-input error.
+    let rules = r#"[{"match":"","value":{"findings":[{"severity":"blocking","family":"bugs","validation":"validated","needsHuman":true,"status":"open","title":"needs a decision"}],"priorFindingsStatus":[]}}]"#;
+    let p = Project::new("pr-review-needs-human", &[("MOCK_SUBMIT_MATCH", rules)]);
+    let script = pr_review_shim(&p, "");
+    let (code, _stdout, stderr) =
+        p.run_with_path(&script, &stub_gh_pr("needs-human"), &["--quiet"]);
+    assert_eq!(code, 1, "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("human input is required to resolve the findings"),
+        "stderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// std/escalate — the ask transport (outcome as data)
+// ---------------------------------------------------------------------
+
+#[test]
+fn escalate_unavailable_without_a_provider() {
+    // No provider is configured and the run is not a TTY, so `ptah.ask`
+    // raises and the transport classifies it as data — the script keeps
+    // running.
+    let p = Project::new("escalate-unavailable", &[]);
     let script = p.write(
         "main.luau",
         r#"--!strict
-local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
-local loop = prReview.new({
-	agent = ptah.agent("demo"),
-	judgeAgent = ptah.agent("judge"),
-	judgeSessionConfig = { { id = "model", value = "haiku" }, { id = "effort", value = "high" } },
-})
-local text = loop:review("https://github.com/example/example/pull/6")
-print("review-ok:" .. tostring(text ~= nil))
+local escalate = require("@ptah_libs").std.escalate
+local o = escalate.ask({ prompt = "Need a human", details = "context" })
+print("status=" .. o.status)
 "#,
     );
     let (code, stdout, stderr) = p.run(&script, &["--quiet"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(
-        stdout.contains("review-ok:true"),
-        "the review judge session must receive the forwarded entries, stdout: {stdout}"
-    );
+    assert!(stdout.contains("status=unavailable"), "stdout: {stdout}");
+}
 
-    // Probe session: a probe-only ruleset (no review-accept rule) keeps
-    // the review judge rejecting, so the escalation's gated rule — which
-    // fires only on a configured probe session — surfaces the human
-    // error.
-    let probe_rules = r#"[{"match":"Human input is required","value":true,"requiresConfig":{"effort":"high"}},{"match":"","value":false}]"#;
-    let probe_judge_env: Vec<(&str, &str)> = vec![
-        ("MOCK_CONFIG_OPTIONS", CONFIG_OPTIONS_JSON),
-        ("MOCK_CONFIG_DEPENDENT", "1"),
-        ("MOCK_SUBMIT_MATCH", probe_rules),
-    ];
-    let p = Project::new_agents("pr-review-config-probe", &[("judge", &probe_judge_env)]);
+#[test]
+fn escalate_respond_returns_the_human_answer() {
+    let p = Project::new("escalate-respond", &[]);
     let script = p.write(
         "main.luau",
         r#"--!strict
-local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
-local loop = prReview.new({
-	agent = ptah.agent("demo"),
-	judgeAgent = ptah.agent("judge"),
-	judgeSessionConfig = { { id = "model", value = "haiku" }, { id = "effort", value = "high" } },
-	maxIterations = 2,
-})
-loop:review("https://github.com/example/example/pull/6")
+local escalate = require("@ptah_libs").std.escalate
+local o = escalate.ask({ prompt = "Approve the change?", details = "full context" })
+if o.status == "respond" then
+	print("answer=" .. o.text)
+else
+	print("status=" .. o.status)
+end
 "#,
     );
-    let (code, _stdout, stderr) = p.run(&script, &["--quiet"]);
-    assert_eq!(code, 1, "stderr:\n{stderr}");
-    assert!(
-        stderr.contains("human input is required"),
-        "the probe session must receive the entries (gated escalation confirms), stderr: {stderr}"
-    );
+    let mut run = common::PipedRun::spawn(&p.dir, &script, &["--ask=stdin"]);
+    run.wait_for("Approve the change?");
+    run.write_line("yes, ship it");
+    run.wait_for("answer=yes, ship it");
+    let (code, all, stderr) = run.finish();
+    assert_eq!(code, 0, "stderr:\n{stderr}\nstdout:\n{all}");
+}
 
-    // Negative: no entries — neither gate ever fires; the loop
-    // exhausts the cap.
-    let p = Project::new_agents("pr-review-config-judge-none", &[("judge", &judge_env)]);
+#[test]
+fn escalate_abort_is_data() {
+    let p = Project::new("escalate-abort", &[]);
     let script = p.write(
         "main.luau",
         r#"--!strict
-local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
-local loop = prReview.new({
-	agent = ptah.agent("demo"),
-	judgeAgent = ptah.agent("judge"),
-	maxIterations = 2,
-})
-loop:review("https://github.com/example/example/pull/6")
+local escalate = require("@ptah_libs").std.escalate
+local o = escalate.ask({ prompt = "Approve the change?" })
+print("status=" .. o.status)
 "#,
     );
-    let (code, _stdout, stderr) = p.run(&script, &["--quiet"]);
-    assert_eq!(code, 1, "stderr:\n{stderr}");
-    assert!(
-        stderr.contains("did not converge within 2 iterations"),
-        "without entries the gates must never fire, stderr: {stderr}"
+    let mut run = common::PipedRun::spawn(&p.dir, &script, &["--ask=stdin"]);
+    run.wait_for("Approve the change?");
+    run.write_line("/abort");
+    run.wait_for("status=abort");
+    let (code, all, stderr) = run.finish();
+    assert_eq!(code, 0, "stderr:\n{stderr}\nstdout:\n{all}");
+}
+
+// ---------------------------------------------------------------------
+// The pin guard: the flake-pinned source is the tree the committed
+// `.ptah/pesde.lock` pins (they must move together).
+// ---------------------------------------------------------------------
+
+/// Read `PTAH_LIBS_SRC` as `(relative path, contents)` pairs, skipping the
+/// `.git` directory (a dev checkout has one; a nix flake input does not).
+fn read_tree_files(root: &Path) -> Vec<(String, String)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("read source dir") {
+            let entry = entry.expect("dir entry");
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("path under root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let contents = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                out.push((rel, contents));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// The `tree_id` recorded for the git dependency in the committed lockfile.
+fn committed_lockfile_tree_id() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.ptah/pesde.lock");
+    let text = std::fs::read_to_string(&path).expect("read .ptah/pesde.lock");
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("tree_id = ") {
+            return rest.trim().trim_matches('"').to_string();
+        }
+    }
+    panic!("no git pkg_ref tree_id in .ptah/pesde.lock");
+}
+
+#[test]
+fn flake_pin_matches_the_committed_lockfile_tree() {
+    // Rebuild the pinned source as a git tree and compare its root tree id
+    // to the lockfile's: a `ptah package update` must be paired with
+    // `nix flake update ptah-libs`.
+    let src = library_src();
+    let files = read_tree_files(&src);
+    let specs: Vec<ptah_pesde::fixtures::FileSpec<'_>> = files
+        .iter()
+        .map(|(path, contents)| ptah_pesde::fixtures::FileSpec {
+            path: path.as_str(),
+            contents: contents.as_str(),
+        })
+        .collect();
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let fixture = ptah_pesde::fixtures::git_repo(scratch.path(), &specs);
+    assert_eq!(
+        fixture.tree_id.to_string(),
+        committed_lockfile_tree_id(),
+        "PTAH_LIBS_SRC is not the tree .ptah/pesde.lock pins: \
+         pair `ptah package update` with `nix flake update ptah-libs`"
     );
 }
 
@@ -1358,14 +1505,15 @@ fn workflow(name: &str) -> PathBuf {
 #[test]
 fn dogfood_openspec_shim_runs() {
     // The openspec shim as it exists in the repo: the groom/implement/
-    // verify operations themselves are covered component-level above;
-    // this pins that the actual shim runs against the mock — it
-    // processes both of its named changes through the archive step of
-    // verify and the commit session, with every judge predicate
-    // converging under an all-true rule set.
+    // verify operations themselves are covered playbook-level above; this
+    // pins that the actual shim runs against the mock. The shim is copied
+    // into the generated project so its `@ptah_libs` require resolves
+    // against that project's install (alias resolution is file-relative).
     let rules = r#"[{"match":"","value":true}]"#.to_string();
     let p = Project::new_env("dogfood-openspec", "pi", &[("MOCK_SUBMIT_MATCH", &rules)]);
-    let (code, stdout, stderr) = p.run(&workflow("openspec/main.luau"), &["--no-color"]);
+    let shim = std::fs::read_to_string(workflow("openspec/main.luau")).unwrap();
+    let script = p.write("openspec_shim.luau", &shim);
+    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("Please sync and archive the change"),
@@ -1378,68 +1526,15 @@ fn dogfood_pr_review_loop_shim_runs() {
     let p = Project::new_env(
         "dogfood-pr-review",
         "pi",
-        &[("MOCK_SUBMIT_MATCH", &converges_on_second_pass())],
+        &[("MOCK_SUBMIT_MATCH", &pr_review_converges_after_fix())],
     );
-    let (code, stdout, stderr) = p.run(&workflow("pr-review-loop/main.luau"), &["--no-color"]);
+    let shim = std::fs::read_to_string(workflow("pr-review-loop/main.luau")).unwrap();
+    let script = p.write("pr_review_shim.luau", &shim);
+    let (code, stdout, stderr) = p.run_with_path(&script, &stub_gh_pr("dogfood"), &["--no-color"]);
     assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
         stdout.contains("push them to the PR branch"),
         "review loop shim must push after the fix, stdout: {stdout}"
-    );
-}
-
-// ---------------------------------------------------------------------
-// Read-only mount: the library tree works from a read-only location
-// (e.g. the nix store) — no writes inside the tree, no relative-cwd
-// dependence.
-// ---------------------------------------------------------------------
-
-#[cfg(unix)]
-fn set_tree_mode(root: &Path, dir_mode: u32, file_mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::metadata(root).unwrap();
-    std::fs::set_permissions(
-        root,
-        std::fs::Permissions::from_mode(if meta.is_dir() { dir_mode } else { file_mode }),
-    )
-    .unwrap();
-    if meta.is_dir() {
-        for entry in std::fs::read_dir(root).unwrap() {
-            set_tree_mode(&entry.unwrap().path(), dir_mode, file_mode);
-        }
-    }
-}
-
-#[test]
-#[cfg(unix)]
-fn component_runs_from_a_read_only_mount() {
-    let p = Project::new("read-only-mount", &[("MOCK_SUBMIT_MATCH", &always(true))]);
-    // Re-mount the library read-only (dirs 0555, files 0444): any write
-    // inside the tree would fail with EROFS and the run would error.
-    let mounted = p.dir.join("vendor/factory-components");
-    set_tree_mode(&mounted, 0o555, 0o444);
-    // The shim lives elsewhere and the run is invoked from the project
-    // dir — not the library's — pinning the no-relative-cwd contract.
-    let script = p.write(
-        "shim.luau",
-        r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
-local ops = openspec.new({ agent = ptah.agent("demo"), judgeAgent = ptah.agent("judge") })
-local text = ops:verify("some-change")
-print("readonly-mount-ok:" .. tostring(text ~= nil))
-"#,
-    );
-    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
-    // Restore writable modes so temp-dir cleanup can remove the tree.
-    set_tree_mode(&mounted, 0o755, 0o644);
-    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(
-        stdout.contains("readonly-mount-ok:true"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains("Please sync and archive the change some-change"),
-        "the full operation must complete from the read-only mount, stdout: {stdout}"
     );
 }
 
@@ -1470,7 +1565,7 @@ fn mistyped_component_config_is_a_check_finding() {
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 openspec.new({ agent = ptah.agent("demo"), judgeAgnt = ptah.agent("demo") })
 "#,
     );
@@ -1487,7 +1582,7 @@ openspec.new({ agent = ptah.agent("demo"), judgeAgnt = ptah.agent("demo") })
     let script = p.write(
         "main.luau",
         r#"--!strict
-local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
+local prReview = require("@ptah_libs").prReviewLoop
 prReview.new({ agent = ptah.agent("demo"), judgeAgent = ptah.agent("judge"), reviewInstruction = "x.md", dryRun = "yes" })
 "#,
     );
@@ -1505,7 +1600,7 @@ prReview.new({ agent = ptah.agent("demo"), judgeAgent = ptah.agent("judge"), rev
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 openspec.new({ agent = ptah.agent("demo"), judgeAgent = ptah.agent("judge"), maxIterations = function() return 3 end })
 "#,
     );
@@ -1525,7 +1620,7 @@ openspec.new({ agent = ptah.agent("demo"), judgeAgent = ptah.agent("judge"), max
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 openspec.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -1547,7 +1642,7 @@ openspec.new({
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 openspec.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -1568,7 +1663,7 @@ openspec.new({
     let script = p.write(
         "main.luau",
         r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
+local openspec = require("@ptah_libs").openspec
 openspec.new({
 	agent = ptah.agent("demo"),
 	judgeAgent = ptah.agent("judge"),
@@ -1594,8 +1689,8 @@ openspec.new({
         "main.luau",
         format!(
             r#"--!strict
-local openspec = require("./vendor/factory-components/components/openspec/component")
-local prReview = require("./vendor/factory-components/components/pr-review-loop/component")
+local openspec = require("@ptah_libs").openspec
+local prReview = require("@ptah_libs").prReviewLoop
 local inline = ptah.agent({{ command = "{mock}" }})
 local ops = openspec.new({{
 	agent = inline,
