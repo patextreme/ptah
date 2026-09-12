@@ -30,7 +30,9 @@ Alternatives considered:
 - **Delete/repoint local refs** — `HEAD` is a symref to `refs/heads/<branch>`; removing it breaks `HEAD` resolution.
 
 ### D2 — Append, don't replace, and only when absent
-Append to the refspec list so the original `+refs/heads/*:refs/remotes/origin/*` stays first: `root_tree` (used by registry-index sources) reads `refspecs(...).first()`, and preserving order keeps its behavior byte-identical. Check existing values first and write only when the local-heads refspec is missing, so repeat runs are no-ops and there is no config churn or lock contention.
+Append to the refspec list so the original `+refs/heads/*:refs/remotes/origin/*` is retained: normalization adds a mapping and never removes one. Check existing values first and write only when the local-heads refspec is missing, so repeat runs are no-ops and there is no config churn or lock contention.
+
+Ordering note: gix returns `remote.refspecs(Fetch)` **sorted** — its `try_find_remote_inner` sorts and dedups the configured specs — so config order is not observable through that API, and after normalization the added local-heads mapping sorts first. This does not affect `root_tree`, Pesde's only first-refspec consumer: `root_tree` is reached solely by Git-based **index** sources (`<data_dir>/indices/<hash>`), while this helper only touches git dependency caches (`<data_dir>/git_repos/<hash>`). The original rationale (preserving order for `root_tree`) applied to a repository set the helper never touches.
 
 ### D3 — A driver pre-pass in `install()` and `add()`, not in `PackageProject::open`
 Enumerate `<data_dir>/git_repos/*`, `gix::open` each bare repo, and normalize its default remote. Call it at the top of `install()` (covers `update` and `remove`, which funnel through install) and at the top of `add()` (its own resolve pass precedes its install). Doing it in `PackageProject::open` would add filesystem mutation to a pure constructor and run for commands that never touch git; a new port would be a core design decision for an adapter-local workaround.

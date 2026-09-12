@@ -82,6 +82,8 @@ pub async fn install(
     client: &reqwest::Client,
     opts: &InstallOptions,
 ) -> Result<InstallOutcome, Error> {
+    normalize_git_cache(project);
+
     let manifest = manifest::deser_manifest(project).await?;
     manifest::require_luau_target(&manifest)?;
 
@@ -232,6 +234,8 @@ pub async fn add(
     request: &AddRequest,
     install_after: bool,
 ) -> Result<AddOutcome, Error> {
+    normalize_git_cache(project);
+
     let manifest = manifest::deser_manifest(project).await?;
     manifest::require_luau_target(&manifest)?;
 
@@ -488,6 +492,65 @@ fn error_chain(e: &dyn std::error::Error) -> String {
         source = s.source();
     }
     chain
+}
+
+/// The fetch refspec that makes `git fetch` advance a cached bare
+/// repository's local branch refs, not just its remote-tracking refs.
+const LOCAL_HEADS_REFSPEC: &str = "+refs/heads/*:refs/heads/*";
+
+/// Normalize every cached git dependency repository so that Pesde's own
+/// fetch advances local branch refs, not only the remote-tracking refs.
+///
+/// Pesde 0.7.4 refreshes its git caches with the clone's default refspec
+/// (`+refs/heads/*:refs/remotes/origin/*`), so after the initial clone
+/// `refs/heads/<branch>` is frozen while `refs/remotes/origin/<branch>`
+/// advances. Pesde's `resolve` then rev-parses `HEAD`/`<branch>` against
+/// the frozen local ref, so unpinned dependencies never advance and
+/// `--rev <branch>` reads a stale tree. Appending [`LOCAL_HEADS_REFSPEC`]
+/// to the cached default remote makes Pesde's unchanged fetch update the
+/// local refs too. The coupling to Pesde's private cache layout
+/// (`<data_dir>/git_repos/<hash>`) is deliberate — the engine is pinned
+/// exactly and the regression tests exercise this real path.
+///
+/// Best-effort and idempotent: a missing cache directory short-circuits,
+/// unreadable or non-repository entries are skipped, and a repository
+/// whose default remote already carries the mapping is left untouched
+/// (no config churn).
+fn normalize_git_cache(project: &PackageProject) {
+    let dir = project.pesde().data_dir().join("git_repos");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let _ = normalize_cached_repo(&entry.path());
+    }
+}
+
+/// Append [`LOCAL_HEADS_REFSPEC`] to one cached bare repository's default
+/// remote when the mapping is absent, preserving the existing refspecs by
+/// appending rather than replacing them.
+fn normalize_cached_repo(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = gix::open(path)?;
+    let Some(remote) = repo.find_default_remote(gix::remote::Direction::Fetch) else {
+        return Ok(());
+    };
+    let remote = remote?;
+    if remote
+        .refspecs(gix::remote::Direction::Fetch)
+        .iter()
+        .any(|spec| spec.to_ref().to_bstring() == LOCAL_HEADS_REFSPEC)
+    {
+        return Ok(());
+    }
+
+    let remote = remote.with_refspecs([LOCAL_HEADS_REFSPEC], gix::remote::Direction::Fetch)?;
+    let config_path = repo.path().join("config");
+    let mut config =
+        gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)?;
+    remote.save_to(&mut config)?;
+    let mut file = std::fs::File::create(&config_path)?;
+    config.write_to(&mut file)?;
+    Ok(())
 }
 
 /// The repository name of a git URL (last path segment, `.git`
@@ -1101,27 +1164,39 @@ hello = { name = "abc/hello", version = "^0.2.0" }
     // in-process by pesde's gix transport — no network.
     // ------------------------------------------------------------------
 
-    fn fixture_git_package() -> (tempfile::TempDir, crate::fixtures::GitFixture) {
-        let dir = tempfile::tempdir().unwrap();
-        let fixture = crate::fixtures::git_repo(
-            dir.path(),
-            &[
-                crate::fixtures::FileSpec {
-                    path: "pesde.toml",
-                    contents: r#"name = "abc/hello"
+    /// The git fixture package's manifest — shared by the initial fixture
+    /// and the branch-advance steps so a new tip changes only the code.
+    const GIT_PACKAGE_MANIFEST: &str = r#"name = "abc/hello"
 version = "0.1.0"
 
 [target]
 environment = "luau"
 lib = "init.luau"
-"#,
+"#;
+
+    /// Build (or advance) the git fixture package's branch with a tip
+    /// whose `init.luau` carries `marker`; the manifest is unchanged, so
+    /// advancing changes only the code and produces a new tree.
+    fn advance_git_package(dir: &std::path::Path, marker: &str) -> crate::fixtures::GitFixture {
+        let contents = format!("--!strict\nreturn {{ greet = '{marker}' }}\n");
+        crate::fixtures::git_repo(
+            dir,
+            &[
+                crate::fixtures::FileSpec {
+                    path: "pesde.toml",
+                    contents: GIT_PACKAGE_MANIFEST,
                 },
                 crate::fixtures::FileSpec {
                     path: "init.luau",
-                    contents: "--!strict\nreturn { greet = 'hi from git' }\n",
+                    contents: &contents,
                 },
             ],
-        );
+        )
+    }
+
+    fn fixture_git_package() -> (tempfile::TempDir, crate::fixtures::GitFixture) {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = advance_git_package(dir.path(), "hi from git");
         (dir, fixture)
     }
 
@@ -1247,5 +1322,357 @@ lib = "init.luau"
             .ptah_dir()
             .join("luau_packages/hello.luau")
             .is_file());
+    }
+
+    // ------------------------------------------------------------------
+    // Stale git cache (change: fix-stale-git-cache)
+    // ------------------------------------------------------------------
+
+    /// Clone a fixture repository into the project's `git_repos` cache
+    /// exactly as Pesde's refresh does (bare clone), so the helper sees
+    /// the real cached layout: a default remote whose only fetch
+    /// refspec is the remote-tracking one.
+    fn fixture_cached_git_repo(project: &PackageProject) {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::fixtures::git_repo(
+            dir.path(),
+            &[crate::fixtures::FileSpec {
+                path: "init.luau",
+                contents: "--!strict\nreturn { greet = 'cached' }\n",
+            }],
+        );
+        let cache = project.pesde().data_dir().join("git_repos");
+        std::fs::create_dir_all(&cache).unwrap();
+        let url = gix::Url::try_from(format!("file://{}", fixture.dir.display())).unwrap();
+        gix::prepare_clone_bare(url, cache.join("abc"))
+            .unwrap()
+            .fetch_only(gix::progress::Discard, &false.into())
+            .unwrap();
+    }
+
+    fn cached_refspecs(project: &PackageProject) -> Vec<String> {
+        let repo = gix::open(project.pesde().data_dir().join("git_repos/abc")).unwrap();
+        let remote = repo
+            .find_default_remote(gix::remote::Direction::Fetch)
+            .expect("default remote")
+            .unwrap();
+        remote
+            .refspecs(gix::remote::Direction::Fetch)
+            .iter()
+            .map(|spec| spec.to_ref().to_bstring().to_string())
+            .collect()
+    }
+
+    /// Read every `init.luau` under an installed container, to compare
+    /// installed content against a commit without knowing the exact
+    /// versioned path Pesde generates.
+    fn installed_init_contents(container: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![container.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.file_name().is_some_and(|n| n == "init.luau") {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        out.push(text);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn normalize_git_cache_adds_the_local_heads_refspec_once() {
+        let (_proj_dir, project) = fixture_project();
+        fixture_cached_git_repo(&project);
+        let config_path = project.pesde().data_dir().join("git_repos/abc/config");
+
+        let before = cached_refspecs(&project);
+        assert!(
+            !before.iter().any(|s| s == LOCAL_HEADS_REFSPEC),
+            "fixture clone starts without the mapping: {before:?}"
+        );
+
+        normalize_git_cache(&project);
+        let after = cached_refspecs(&project);
+        assert!(
+            after.iter().any(|s| s == LOCAL_HEADS_REFSPEC),
+            "mapping added on the first call: {after:?}"
+        );
+
+        // Idempotent: the second pass rewrites nothing (byte-identical
+        // config, same in-memory refspecs).
+        let first_pass = std::fs::read(&config_path).unwrap();
+        normalize_git_cache(&project);
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            first_pass,
+            "a second call leaves the config unchanged"
+        );
+        assert_eq!(cached_refspecs(&project), after);
+    }
+
+    #[tokio::test]
+    async fn normalize_git_cache_keeps_both_refspecs() {
+        let (_proj_dir, project) = fixture_project();
+        fixture_cached_git_repo(&project);
+        normalize_git_cache(&project);
+        let specs = cached_refspecs(&project);
+        // Normalization appends; it must not drop the clone's original
+        // remote-tracking mapping. gix returns the specs sorted, so the
+        // order itself is not asserted (the local-heads mapping sorts
+        // first); presence as a set is what matters.
+        assert!(
+            specs
+                .iter()
+                .any(|s| s == "+refs/heads/*:refs/remotes/origin/*"),
+            "original remote-tracking refspec retained: {specs:?}"
+        );
+        assert!(
+            specs.iter().any(|s| s == LOCAL_HEADS_REFSPEC),
+            "local-heads refspec added: {specs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_advances_an_unpinned_git_dependency() {
+        let (_proj_dir, project) = fixture_project();
+        let (_repo_dir, repo) = fixture_git_package();
+
+        // Add unpinned: the manifest records `HEAD`, the cache clones at
+        // the current tip, and the lockfile pins that commit.
+        add(
+            &project,
+            &client(),
+            &AddRequest {
+                source: AddSource::Git {
+                    repo: repo.dir.display().to_string(),
+                    rev: None,
+                    path: None,
+                },
+                alias: Some("hello".into()),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        let lock_path = project.ptah_dir().join("pesde.lock");
+        let initial_lock = std::fs::read_to_string(&lock_path).unwrap();
+        assert!(
+            initial_lock.contains(&repo.tree_id.to_string()),
+            "initial pin is the first tip: {initial_lock}"
+        );
+
+        // The branch advances to a new tip with changed contents.
+        let advanced = advance_git_package(&repo.dir, "new");
+        assert_ne!(advanced.tree_id, repo.tree_id);
+
+        update(&project, &client()).await.unwrap();
+
+        let updated_lock = std::fs::read_to_string(&lock_path).unwrap();
+        assert!(
+            updated_lock.contains(&advanced.tree_id.to_string()),
+            "update advanced the pin: {updated_lock}"
+        );
+        assert!(
+            !updated_lock.contains(&repo.tree_id.to_string()),
+            "the old tip is gone: {updated_lock}"
+        );
+
+        let container = project.ptah_dir().join("luau_packages/.pesde/abc+hello");
+        let installed = installed_init_contents(&container);
+        assert!(!installed.is_empty(), "installed under {container:?}");
+        assert!(
+            installed.iter().any(|s| s.contains("'new'")),
+            "installed files match the new tip: {installed:?}"
+        );
+        assert!(
+            !installed.iter().any(|s| s.contains("hi from git")),
+            "no stale content survives: {installed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_branch_rev_resolves_against_a_warm_cache() {
+        let (_proj_dir, project) = fixture_project();
+        let dir = tempfile::tempdir().unwrap();
+        // The branch's first tip has no manifest yet.
+        let initial = crate::fixtures::git_repo(
+            dir.path(),
+            &[crate::fixtures::FileSpec {
+                path: "init.luau",
+                contents: "--!strict\nreturn {}\n",
+            }],
+        );
+        let repo = initial.dir.display().to_string();
+
+        // First add: Pesde clones the cache during refresh, then fails
+        // to resolve — the cached tip has no manifest. The cache stays.
+        let err = add(
+            &project,
+            &client(),
+            &AddRequest {
+                source: AddSource::Git {
+                    repo: repo.clone(),
+                    rev: Some("main".into()),
+                    path: None,
+                },
+                alias: Some("hello".into()),
+            },
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no manifest found"),
+            "first add fails on the manifest-less tip: {err}"
+        );
+
+        // The branch advances to add the manifest and package code.
+        let advanced = advance_git_package(dir.path(), "new");
+
+        // Second add against the warm cache resolves at the new tip.
+        let outcome = add(
+            &project,
+            &client(),
+            &AddRequest {
+                source: AddSource::Git {
+                    repo,
+                    rev: Some("main".into()),
+                    path: None,
+                },
+                alias: Some("hello".into()),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(&outcome.entry, DependencyEntry::Git { rev, .. } if rev == "main"),
+            "branch rev recorded: {:?}",
+            outcome.entry
+        );
+
+        let lock = std::fs::read_to_string(project.ptah_dir().join("pesde.lock")).unwrap();
+        assert!(
+            lock.contains(&advanced.tree_id.to_string()),
+            "resolved at the advanced tip: {lock}"
+        );
+        let container = project.ptah_dir().join("luau_packages/.pesde/abc+hello");
+        assert!(
+            installed_init_contents(&container)
+                .iter()
+                .any(|s| s.contains("'new'")),
+            "installed files match the new tip"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_keeps_a_git_branch_dependency_pinned() {
+        let (_proj_dir, project) = fixture_project();
+        let (_repo_dir, repo) = fixture_git_package();
+
+        add(
+            &project,
+            &client(),
+            &AddRequest {
+                source: AddSource::Git {
+                    repo: repo.dir.display().to_string(),
+                    rev: None,
+                    path: None,
+                },
+                alias: Some("hello".into()),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        let lock_path = project.ptah_dir().join("pesde.lock");
+        let pinned = std::fs::read_to_string(&lock_path).unwrap();
+        assert!(pinned.contains(&repo.tree_id.to_string()));
+
+        // The branch advances, but a plain install reuses the lockfile's
+        // pin — only `update` moves a branch-tracking dependency.
+        let advanced = advance_git_package(&repo.dir, "new");
+        assert_ne!(advanced.tree_id, repo.tree_id);
+
+        let outcome = install(&project, &client(), &InstallOptions::default())
+            .await
+            .unwrap();
+        assert!(!outcome.lockfile_written, "install must not move the pin");
+
+        let after = std::fs::read_to_string(&lock_path).unwrap();
+        assert!(
+            after.contains(&repo.tree_id.to_string()),
+            "still pinned at the earlier commit: {after}"
+        );
+        assert!(
+            !after.contains(&advanced.tree_id.to_string()),
+            "install did not advance: {after}"
+        );
+        let installed =
+            installed_init_contents(&project.ptah_dir().join("luau_packages/.pesde/abc+hello"));
+        assert!(
+            installed.iter().any(|s| s.contains("hi from git")),
+            "installed files match the pinned commit: {installed:?}"
+        );
+        assert!(
+            !installed.iter().any(|s| s.contains("'new'")),
+            "no advanced content installed: {installed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_keeps_a_commit_pinned_git_dependency() {
+        let (_proj_dir, project) = fixture_project();
+        let (_repo_dir, repo) = fixture_git_package();
+
+        // Pin to the explicit commit SHA of the first tip.
+        add(
+            &project,
+            &client(),
+            &AddRequest {
+                source: AddSource::Git {
+                    repo: repo.dir.display().to_string(),
+                    rev: Some(repo.head.to_string()),
+                    path: None,
+                },
+                alias: Some("hello".into()),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        let lock_path = project.ptah_dir().join("pesde.lock");
+        let pinned = std::fs::read_to_string(&lock_path).unwrap();
+        assert!(pinned.contains(&repo.tree_id.to_string()));
+
+        // The branch advances, but a commit-pinned dependency stays put.
+        let advanced = advance_git_package(&repo.dir, "new");
+        assert_ne!(advanced.tree_id, repo.tree_id);
+
+        update(&project, &client()).await.unwrap();
+
+        let after = std::fs::read_to_string(&lock_path).unwrap();
+        assert!(
+            after.contains(&repo.tree_id.to_string()),
+            "commit pin preserved: {after}"
+        );
+        assert!(
+            !after.contains(&advanced.tree_id.to_string()),
+            "update did not move a commit-pinned dep: {after}"
+        );
+        let installed =
+            installed_init_contents(&project.ptah_dir().join("luau_packages/.pesde/abc+hello"));
+        assert!(
+            installed.iter().any(|s| s.contains("hi from git")),
+            "installed files match the pinned commit: {installed:?}"
+        );
     }
 }
