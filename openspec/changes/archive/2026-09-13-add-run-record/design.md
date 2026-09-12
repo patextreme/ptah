@@ -29,8 +29,8 @@ See `proposal.md` — Why. The current state that shapes the approach:
 - **Two upward searches already exist and disagree.** `ptah-config::discover`
   stops at the nearest `.ptah/config.toml`; `ptah-pesde`'s project discovery
   accepts `config.toml` *or* `pesde.toml`.
-- **Dependencies already in the tree but undeclared:** `getrandom` (via
-  `pesde`/`reqwest`), `sha2`. `jiff` is the declared clock.
+- **Dependencies already in the tree but undeclared:** `getrandom` 0.4 (via
+  `pesde`'s `gix`/`tempfile`/`uuid` stack), `sha2`. `jiff` is the declared clock.
 - **`print` bypasses all of this.** Luau's `print` writes to the process's
   stdout through mlua, never through the renderer — the `cli` spec already
   states script `print` output "does not pass through the renderer".
@@ -118,10 +118,14 @@ land, but nothing here depends on them):
   a filename). UTC rather than local time is the important half: the renderer
   prints local timestamps everywhere, but a local-time id is ambiguous across a
   DST fold, which breaks the one property the id exists for. Randomness comes
-  from `getrandom` — a crate already in the tree transitively via `pesde`/
-  `reqwest`, declared explicitly here rather than left implicit. Collisions
-  (same second, same suffix) re-mint instead of merging into a stranger's
-  directory.
+  from `getrandom` 0.4 — the version already resolved in the lock via `pesde`'s
+  `gix`/`tempfile`/`uuid` stack — declared explicitly in the workspace table
+  with its version pinned rather than left implicit. Collisions (same second,
+  same suffix) re-mint instead of merging into a stranger's directory. The
+  ordering guarantee is at timestamp granularity: ids starting in different
+  seconds sort in start order, but two runs starting within one second share a
+  prefix and their suffix order is unspecified — a random suffix neither can
+  nor should encode start order.
 
 - **The project root is the nearest ancestor containing `.ptah/`.** Not
   `find_project_config` (nearest `.ptah/config.toml`), which would silently fall
@@ -132,20 +136,53 @@ land, but nothing here depends on them):
   directory containing `.ptah/`"), so the workspace keeps one notion of project
   root rather than gaining a third.
 
-- **The session-ready event gains a structured payload, reversing a recorded
-  non-goal.** `expose-acp-session-id` explicitly rejected a structured readiness
-  payload: "a `SessionReady` variant would serve only a hypothetical TUI
-  adapter and is that future change's business". That premise is now false — a
-  concrete sink needs the id. Rather than parse `Lifecycle { message }`, the
-  event carries the label and ACP id as separate values, matching the invariant
-  `events.rs` already states and the precedent `ToolLine` already sets.
-  Alternative rejected: having the record sink parse the rendered message,
-  which would make an audit artifact depend on wording the `render-logging`
-  capability is free to change.
+- **A dedicated `SessionReady` event, reversing a recorded non-goal.** The
+  archived `expose-acp-session-id` change explicitly rejected a structured
+  readiness payload: "a `SessionReady` variant would serve only a hypothetical
+  TUI adapter and is that future change's business". That premise is now false —
+  a concrete sink needs the id. Rather than parse `Lifecycle { message }`, ptah
+  adds `SessionEvent::SessionReady { label, agent, command, args, env_keys,
+  acp_id }`, following the `ToolLine` precedent (the structured facts travel
+  beside the rendering decision, and the renderer formats the line). It is
+  emitted from `crates/ptah-luau/src/bindings.rs` once `start_session` returns,
+  because that is the only site holding all four facts at once: the label and
+  agent name are the script's, the ACP id arrives on the returned handle, and
+  the authored shape is read there. The ACP driver therefore stops emitting its
+  `session ready` lifecycle line (it keeps its config/teardown lifecycle
+  emissions); the renderer reconstructs the byte-identical line from
+  `SessionReady` in verbose mode, and the record sink reads the facts. This also
+  dissolves the tempting-but-wrong change at `bindings.rs:340`, which is the
+  `spawning agent` line and has no ACP id yet. Alternatives rejected: adding
+  optional structure to the many-purpose `Lifecycle` variant (an audit fact
+  would sit in the same event as config and teardown notes), and having the
+  record sink parse the rendered message (an audit artifact depending on
+  wording the `render-logging` capability is free to change).
+
+- **The authored shape is read through a `Registry::raw` accessor.** `Registry`
+  stores specs raw and resolves `${VAR}` only in `resolve`/`resolve_with`, so the
+  record's pre-interpolation `command`/`args` are reachable only through a new
+  accessor. This keeps the secrets boundary in one place (the config model owns
+  what "raw" means) instead of teaching the record to un-interpolate. An inline
+  `ptah.agent({ ... })` spec has no registry entry, so the bindings capture the
+  authored table values before `.interpolate`; the recorded agent name is the
+  registry name for named agents and the authored command for an inline spec.
+
+- **The run-start line is emitted by the composition root onto both renderers.**
+  It is not a session event, so the `EventSink` fan-out cannot carry it: the
+  root keeps the terminal and record `Renderer` handles, emits the line through
+  the `ptah`-attributed method (the `exec_line` gate) on each after the record
+  exists, and only then hands the fan-out to the runtime. The terminal
+  renderer's `--quiet` gate suppresses it there; the record renderer
+  (`quiet: false`) always writes it.
+
+- **The record assigns ask ordinals from its own counter.** `AskRequested`
+  carries no ordinal (the renderer's `ask {n}` label does), and asks are
+  serialized in issue order, so counting `AskRequested` in emission order yields
+  the same ordinal the label shows without parsing rendered wording.
 
 - **`status` is derived from how the process ended, not from script intent.**
-  `ok` (exit 0), `failed` (non-zero exit), `cancelled` (signal), `running` (no
-  end yet). A deliberate `ptah.exit(3)` is therefore `failed`, with exit code 3.
+  `ok` (exit 0), `failed` (non-zero exit), `cancelled` (the runtime reports a
+  terminating signal), `running` (no end yet). A deliberate `ptah.exit(3)` is therefore `failed`, with exit code 3.
   Alternative rejected: an `explicit-exit` status — the CLI cannot distinguish
   "the script finished having decided to fail" from "a task error was never
   observed" (both are exit 1 with different causes), and inventing a status the
@@ -153,15 +190,31 @@ land, but nothing here depends on them):
   reports outcomes; judging them is the operator's job. `running` on a record
   whose process is gone is the honest signal for "died without teardown".
 
+- **The runtime reports cancellation separately from the exit code.** `RunOutcome`
+  carries `code`, `error`, and `undelivered_errors` and nothing else, so a signal
+  (130/143) is indistinguishable from a script that chose `ptah.exit(130)`. The
+  record needs that distinction, so `RunOutcome` gains `cancelled: bool`
+  (`crates/ptah-luau/src/state.rs`), set `true` by the cancel arms in `run.rs`
+  (the `End::Cancelled` return and each `shutdown_*` return) and `false`
+  everywhere else. `run.json`'s `status` derives from the pair: `cancelled` when
+  the flag is set, else `ok`/`failed` from the exit code. A richer `RunEnd` enum
+  was rejected as unnecessary — every non-cancel status is already derivable
+  from `code` plus `error`/`undelivered_errors`, and classifying setup/read
+  failures into new variants would change no observable output. The force-kill
+  paths — the signal monitor's second signal (`std::process::exit`) and SIGKILL —
+  do not return through `run`, so they leave the record at `running`, the same
+  honest "died without teardown" state the `status` decision already defines.
+
 - **`run.json` records invocation *shape*, never secrets.** `command` and
-  `args` are taken from the config layer, before `${VAR}` interpolation, and env
-  contributes key names only, never values. The proposal's source material says
+  `args` are taken from the configuration layer, before `${VAR}` interpolation,
+  and env contributes key names only, never values. The proposal's source material says
   "the resolved registry's command/arg shape"; *resolved* is the wrong word for
   a security boundary, because `${VAR}` interpolation is a supported feature and
   `args = ["--key", "${ANTHROPIC_API_KEY}"]` is a documented pattern — a
   resolved arg list can literally contain an API key. What is worth recording is
-  a property of the configuration file. Only agents whose sessions actually
-  started appear, so an unused registry is neither leaked nor implied to have run.
+  a property of the configuration file, read through `Registry::raw`. Only agents
+  whose sessions actually started appear, so an unused registry is neither leaked
+  nor implied to have run.
 
 - **Recording is best-effort; the directory and its `.gitignore` are one
   unit.** Attempt to create them together; if either fails, skip the record,
@@ -212,9 +265,13 @@ land, but nothing here depends on them):
   write leaves an empty record directory] → Acceptable: the directory exists
   with its ignore file and no metadata; the operator sees an anomalous entry
   rather than a leak or a half-written file.
-- [`getrandom` becomes an explicit workspace dependency] → Already in the tree
-  transitively; the declaration makes the edge honest instead of relying on a
-  dependency that could vanish from the lock.
+- [`getrandom` becomes an explicit workspace dependency] → Already resolved in
+  the lock at 0.4.3; the pinned declaration makes the edge honest instead of
+  relying on a dependency that could vanish from the lock.
+- [A second SIGINT/SIGTERM hard-exits before the final `run.json` write] →
+  The record is left at status `running`, exactly like a SIGKILL. Accepted: the
+  hard exit exists precisely because teardown is wedged, and an anomalous
+  `running` record is honest where a fabricated `cancelled` would not be.
 
 ## Migration Plan
 

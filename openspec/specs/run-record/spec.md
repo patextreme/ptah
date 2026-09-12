@@ -1,3 +1,5 @@
+# Run Record Specification
+
 ## Purpose
 
 Gives every `ptah run` a durable, self-describing record of what it was and how
@@ -5,7 +7,7 @@ it ended — the identity ptah mints for a run and the files it leaves behind
 under the project's `.ptah/runs/` — so a headless run's audit trail no longer
 depends on the operator having redirected stdout.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Every run gets an identity and a record
 
@@ -41,18 +43,24 @@ not create one.
 ### Requirement: Run ids are sortable and collision-free
 
 The run id SHALL be the run's start instant in UTC formatted `yyyymmddhhmmss`,
-followed by `-` and a short suffix of decimal digits. Run ids SHALL sort
-lexicographically in the order the runs started, in every timezone. When a
-directory for a freshly minted id already exists, ptah SHALL mint another id
-rather than reuse, merge into, or overwrite that directory.
+followed by `-` and a short suffix of decimal digits. The timestamp prefix
+SHALL sort lexicographically in the order the runs started, in every timezone;
+runs that start within the same second share that prefix, and their relative
+order is unspecified. When a directory for a freshly minted id already exists,
+ptah SHALL mint another id rather than reuse, merge into, or overwrite that
+directory.
 
 #### Scenario: Id shape
 - **WHEN** a run starts at 2026-09-12T14:32:24Z
 - **THEN** its id begins `20260912143224-` and the remainder is decimal digits
 
-#### Scenario: Ordering reflects start order
-- **WHEN** two runs are recorded in sequence
+#### Scenario: Ordering reflects start order across seconds
+- **WHEN** two runs start in different seconds
 - **THEN** ascending lexicographic order of their ids is the order they started
+
+#### Scenario: Same-second runs share a prefix
+- **WHEN** two runs start within the same second
+- **THEN** their ids share the timestamp prefix and their relative sort order is unspecified
 
 #### Scenario: UTC regardless of the machine's zone
 - **WHEN** a run starts at local time 2026-09-12 21:32:24 in a UTC+7 zone
@@ -132,8 +140,13 @@ version; start and end instants as RFC 3339 in UTC; a status of `running`,
 `ok`, `failed`, or `cancelled`; the process exit code once the run has ended;
 the terminal error message when the run ended in error; the sessions that
 started; and the asks that were issued. The status SHALL be derived from how
-the process ended: `ok` when it exited 0, `failed` when it exited non-zero,
-`cancelled` when a signal terminated it, and `running` while it has not ended.
+the process ended: `cancelled` when the runtime reports the run was terminated
+by a signal, otherwise `ok` when it exited 0 and `failed` when it exited
+non-zero, and `running` while it has not ended. Cancellation SHALL be taken
+from the runtime's report of how the run ended, not inferred from the exit
+code, so a script that exits with a signal's code (`ptah.exit(130)`) is
+`failed`, not `cancelled`; a force-kill that never returns through the runtime
+(a second termination signal, or SIGKILL) SHALL leave the status `running`.
 The file SHALL be indented for reading and terminated with a newline.
 
 #### Scenario: Start write
@@ -153,25 +166,32 @@ The file SHALL be indented for reading and terminated with a newline.
 - **THEN** `run.json` carries status `failed` and that task's error message
 
 #### Scenario: Cancellation
-- **WHEN** the run is cancelled by SIGINT or SIGTERM
+- **WHEN** the first SIGINT or SIGTERM cancels the run
 - **THEN** `run.json` carries status `cancelled` and the signal's exit code
 
 #### Scenario: Non-zero explicit exit
 - **WHEN** a script calls `ptah.exit(3)`
 - **THEN** `run.json` carries status `failed` and exit code 3
 
+#### Scenario: Explicit exit with a signal's code
+- **WHEN** a script calls `ptah.exit(130)`
+- **THEN** `run.json` carries status `failed` and exit code 130
+
 #### Scenario: Killed without teardown
-- **WHEN** a run is killed with SIGKILL
+- **WHEN** a run is force-killed with no teardown (SIGKILL, or a second SIGINT/SIGTERM)
 - **THEN** `run.json` still names the script, argv, invocation directory, start instant, and status `running`
 
 ### Requirement: The record pins invocation shape, never secrets
 
 For each session that started, `run.json` SHALL record the agent's `command`
-and `args` as authored in the configuration file — before `${VAR}`
-interpolation — and the names, never the values, of the environment keys the
-registry declares for that agent. No resolved interpolation value, and no
-environment value inherited from ptah's environment, SHALL appear anywhere in
-`run.json`. Only agents whose sessions actually started SHALL appear.
+and `args` as authored — before `${VAR}` interpolation — and the names, never
+the values, of the environment keys declared for that agent. "Authored" means
+the configuration file for an agent selected by name from the registry, and the
+authored table for an inline `ptah.agent({ ... })` spec; the recorded agent
+name is the registry name, or the authored command for an inline spec. No
+resolved interpolation value, and no environment value inherited from ptah's
+environment, SHALL appear anywhere in `run.json`. Only agents whose sessions
+actually started SHALL appear.
 
 #### Scenario: Environment values are absent
 - **WHEN** an agent's registry entry declares `env = { ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}" }`
@@ -181,22 +201,29 @@ environment value inherited from ptah's environment, SHALL appear anywhere in
 - **WHEN** an agent's registry entry declares `args = ["--key", "${ANTHROPIC_API_KEY}"]`
 - **THEN** `run.json` records those args verbatim, and the key's value appears nowhere in the file
 
+#### Scenario: Inline agent spec is recorded authored
+- **WHEN** a script starts a session with `ptah.agent({ command = "bin", args = ["--key", "${API_KEY}"] })`
+- **THEN** `run.json` records `command = "bin"`, the authored args verbatim, and the key's value appears nowhere
+
 #### Scenario: Unused agents are absent
 - **WHEN** the registry defines five agents and the script starts sessions for two
 - **THEN** `run.json` lists exactly those two
 
 #### Scenario: Inherited environment is not recorded
 - **WHEN** an agent inherits ptah's environment
-- **THEN** only the registry-declared env key names appear
+- **THEN** only the declared env key names appear
 
 ### Requirement: Sessions and asks are recorded for correlation
 
 For each session that started, `run.json` SHALL record the session's label, the
 agent name, the agent's invocation shape, and the agent-assigned ACP session
-id. For each ask issued, it SHALL record the ask's ordinal, its prompt, and its
-details when supplied; once the ask resolves, it SHALL additionally record the
-action and the full response text. An ask the run was torn down while waiting
-on SHALL be recorded with no resolution.
+id, taken from the sessions' structured readiness events rather than parsed
+from rendered lines. For each ask issued, it SHALL record the ask's ordinal,
+its prompt, and its details when supplied; once the ask resolves, it SHALL
+additionally record the action and the full response text. The ordinal is the
+record's own emission-order count of issued asks, which matches the `ask {n}`
+rendered lines carry because asks are serialized in issue order. An ask the run
+was torn down while waiting on SHALL be recorded with no resolution.
 
 #### Scenario: Session labels map to ACP ids
 - **WHEN** a script creates two sessions

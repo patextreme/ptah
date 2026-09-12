@@ -37,24 +37,35 @@ never *which* one. (Issue #24.)
   run start, each session becoming ready, each ask request and resolution, and
   every terminal transition (clean finish, uncaught script error, undelivered
   task error, `ptah.exit`, SIGINT/SIGTERM teardown). A run killed by SIGKILL
-  therefore still leaves a record naming its script, argv, cwd, start time, and
+  (or hard-exited by a second termination signal during teardown) therefore
+  still leaves a record naming its script, argv, cwd, start time, and
   the agents that had started. It carries `status` ∈ `{running, ok, failed,
-  cancelled}`, the process exit code, the terminal error message when there was
+  cancelled}` (cancellation taken from the runtime's report of how the run
+  ended, never inferred from the exit code, so `ptah.exit(130)` is a failure),
+  the process exit code, the terminal error message when there was
   one, per-session `{label, agent, command/args templates, env key names, ACP
   session id}`, and per-ask Q&A. A `schema_version` field carries the layout
   forward.
 - **The record pins invocation shape, never secrets.** `env` values are never
   persisted (key names only), and `command`/`args` are recorded *before*
   `${VAR}` interpolation — a resolved arg list can literally contain an API key.
+  The authored shape is read through a new `Registry::raw` accessor (the config
+  model otherwise resolves `${VAR}` eagerly), and an inline `ptah.agent({...})`
+  spec contributes its authored table values; the recorded agent name is the
+  registry name, or the authored command for an inline spec.
 - **One line at run start** names the record path, at default verbosity, so the
   operator does not have to `ls` for it. It is emitted only after the directory
   and `.gitignore` exist, so it can never name a record that does not.
-- **Structured session readiness.** The session-ready event gains a structured
-  payload carrying the session's label and ACP id, so the record sink reads the
-  id from the event instead of parsing the rendered line. This reverses a
-  non-goal of `expose-acp-session-id` ("a `SessionReady` variant would serve
-  only a hypothetical TUI adapter") because that premise is now false — a
-  concrete sink needs it.
+- **Structured session readiness.** Session readiness is reported to sinks as
+  a dedicated structured event (`SessionReady`) carrying the session's label,
+  its agent name, its authored invocation shape (pre-interpolation
+  `command`/`args` and env key names), and the agent-assigned ACP session id;
+  the rendered `session ready` line is produced by the renderer from that
+  event rather than by the ACP driver. The record sink therefore reads every
+  fact it needs from the event instead of parsing rendered wording. This
+  reverses a non-goal of `expose-acp-session-id` ("a `SessionReady` variant
+  would serve only a hypothetical TUI adapter") because that premise is now
+  false — a concrete sink needs it.
 - **Failure is best-effort.** An unwritable record location (read-only
   checkout, `.ptah` owned by someone else) fails the record, not the run: no
   record, one warning on stderr that prints even under `--quiet`, run proceeds.
@@ -88,17 +99,25 @@ never *which* one. (Issue #24.)
 
 - `crates/ptah-render` — a new `record` module owning the run id, directory
   creation and the self-ignoring `.gitignore`, the `log` writer, the
-  `run.json` schema and its atomic rewrites; plus the `Lifecycle` arm for the
-  structured readiness payload. No `gix`, no new external dependencies.
-- `crates/ptah-core` — `SessionEvent`'s session-ready payload gains the
-  session label and ACP id (`events.rs`), matching the invariant that payloads
-  carry structured facts; the module doc already states that rule.
-- `crates/ptah-luau` — the ready emission site supplies the id it already
-  holds.
+  `run.json` schema and its atomic rewrites; plus the `SessionReady` arm that
+  renders the existing ready line (verbose-only, byte-identical). No `gix`, no
+  new external dependencies.
+- `crates/ptah-core` — the new `SessionEvent::SessionReady` variant
+  (`events.rs`), matching the invariant that payloads carry structured facts
+  (the module doc already states that rule), and a `Registry::raw` accessor
+  (`config/mod.rs`) exposing the pre-interpolation spec, since `resolve`/
+  `resolve_with` otherwise interpolate `${VAR}` eagerly.
+- `crates/ptah-luau` — emits `SessionReady` once the session handle exists
+  (label, agent name, authored shape, ACP id), reading the authored shape
+  through `Registry::raw` for named agents and from the authored table for
+  inline specs; and reports cancellation on `RunOutcome`, so the record can
+  tell a terminating signal from a script's chosen exit code.
+- `crates/ptah-acp` — drops its rendered `session ready` lifecycle emission
+  (the renderer now reconstructs that line from `SessionReady`); no wire change.
 - `crates/ptah-cli` — composition root: mint the id before the renderer is
-  built, construct the fan-out sink feeding both renderers, observe session and
-  ask events for rewrite triggers, and own the warning path when the record
-  cannot be written.
+  built, construct the fan-out sink feeding both renderers, emit the run-start
+  line on both concrete renderers, observe session and ask events for rewrite
+  triggers, and own the warning path when the record cannot be written.
 - Docs: a README section on `.ptah/runs/`; `skills/ptah/SKILL.md` stops
   instructing scripts to hand-embed `session:sessionId()` into `ptah.ask`
   details for correlation and points at the record instead (the `sessionId()`
@@ -112,5 +131,6 @@ never *which* one. (Issue #24.)
   integration coverage for the start line, the best-effort failure warning,
   and a record surviving an abnormal exit.
 - No new CLI surface, and no new crates in the dependency tree: the run id's
-  randomness comes from `getrandom`, already present transitively via
-  `pesde`/`reqwest`, declared explicitly rather than relied on implicitly.
+  randomness comes from `getrandom` 0.4, already resolved in the lock via
+  `pesde`'s `gix`/`tempfile`/`uuid` stack, declared explicitly in the workspace
+  table with its version pinned rather than relied on implicitly.

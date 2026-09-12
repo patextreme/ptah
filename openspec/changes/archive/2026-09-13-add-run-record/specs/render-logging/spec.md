@@ -51,12 +51,15 @@ is an operator diagnostic, suppressed in default mode and by `--quiet` alike.
 Outside verbose mode the label remains the only session id that ever appears
 in rendered output.
 
-The event that announces readiness SHALL additionally carry the session's
-label and its ACP session id as structured data, so a sink that needs the id
-can read it from the event instead of parsing the rendered line — rendered
-wording is the sink's business and is free to change. This structured payload
-SHALL be present regardless of output verbosity: it is a fact about the
-session, not a rendering decision.
+Readiness SHALL be reported to sinks as a dedicated structured event
+(`SessionReady`) carrying the session's label, its agent name, its authored
+invocation shape (pre-interpolation `command`/`args` and environment key
+names), and the agent-assigned ACP session id, emitted once the session is
+ready. The rendered line above SHALL be produced from that event, so a sink
+that needs the id reads it from the event instead of parsing the rendered line
+— rendered wording is the sink's business and is free to change. The event
+SHALL be emitted regardless of output verbosity: it is a fact about the
+session, not a rendering decision, and only the line is verbosity-gated.
 
 #### Scenario: Verbose run shows the ready line with the id
 - **WHEN** a session becomes ready during a `--verbose` run
@@ -69,6 +72,10 @@ session, not a rendering decision.
 #### Scenario: The id is available without parsing the line
 - **WHEN** a session becomes ready in any output mode
 - **THEN** the emitted event carries that session's label and agent-assigned ACP session id as separate structured values
+
+#### Scenario: The invocation shape travels with readiness
+- **WHEN** a session selected by name from the registry becomes ready
+- **THEN** the event carries the agent name and the authored (pre-interpolation) command, args, and environment key names
 
 #### Scenario: Rewording the line does not move the fact
 - **WHEN** the rendered readiness wording changes

@@ -123,6 +123,12 @@ pub struct RunOutcome {
     pub error: Option<String>,
     /// Task errors never delivered to the script (printed to stderr; run fails).
     pub undelivered_errors: Vec<String>,
+    /// The run was terminated by the embedding process's cancellation
+    /// signal (SIGINT/SIGTERM) rather than ending on its own. Set by
+    /// the cancel arms in [`crate::run`]; `false` for every other end,
+    /// including a script's own `ptah.exit(130)` — the distinction the
+    /// run record needs to tell `cancelled` from `failed`.
+    pub cancelled: bool,
 }
 
 pub(crate) fn runtime_state(lua: &mlua::Lua) -> mlua::Result<Rc<RuntimeState>> {

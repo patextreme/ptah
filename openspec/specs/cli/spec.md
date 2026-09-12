@@ -7,7 +7,7 @@ Defines the user-facing command surface of the ptah binary: how scripts are invo
 ## Requirements
 
 ### Requirement: Run subcommand executes a script
-The `ptah` CLI SHALL provide `ptah run <script.luau>`, where `<script.luau>` is a positional required path to the entry Luau script.
+The `ptah` CLI SHALL provide `ptah run <script.luau>`, where `<script.luau>` is a positional required path to the entry Luau script. Each `ptah run` SHALL create a run record for the run, per the `run-record` capability.
 
 #### Scenario: Successful run
 - **WHEN** `ptah run script.luau` is invoked and the script completes without uncaught errors
@@ -20,6 +20,10 @@ The `ptah` CLI SHALL provide `ptah run <script.luau>`, where `<script.luau>` is 
 #### Scenario: Nonexistent script file
 - **WHEN** the positional path does not exist on disk
 - **THEN** the CLI prints an error naming the path and exits non-zero
+
+#### Scenario: A run leaves a record
+- **WHEN** `ptah run script.luau` runs in a project
+- **THEN** a run record directory appears under `<project>/.ptah/runs/`
 
 ### Requirement: Run pre-flight fails certain-broken scripts before spawning
 `ptah run` SHALL perform an in-process pre-flight before executing the script: compile/parse the entry and every file reachable through literal `require("...")` string arguments, resolve literal require targets under ptah's module-resolution rules (existence; no boundary — requires may traverse out of the entry script's directory), resolve literal `ptah.agent("<name>")` string arguments against the discovered registry, and resolve `ptah.ask(` member calls on the `ptah` global (any argument form) over the same reachable set. A pre-flight failure SHALL fail the run before any agent subprocess spawns, with the finding(s) printed to standard error and exit code 1.
@@ -88,7 +92,7 @@ For ask call sites, pre-flight SHALL resolve the interaction provider under the 
 - **THEN** the check's interaction resolution sees the stdin provider (no unresolvable-provider finding)
 
 ### Requirement: Output control flags
-The CLI SHALL accept output flags: `--quiet` suppresses all streaming render and diagnostics, `--verbose` shows runtime lifecycle diagnostics, a second verbosity level (`-vv`) additionally passes agent subprocess stderr through, and `--no-color` disables ANSI colors while keeping text prefixes.
+The CLI SHALL accept output flags: `--quiet` suppresses all streaming render and diagnostics **on the terminal**, `--verbose` shows runtime lifecycle diagnostics, a second verbosity level (`-vv`) additionally passes agent subprocess stderr through, and `--no-color` disables ANSI colors while keeping text prefixes. `--quiet` SHALL NOT suppress the run record: the record always receives the run's rendered stream at the run's verbosity, per the `run-record` capability, so the flag governs what the operator sees and never whether the run is recorded.
 
 #### Scenario: Quiet flag
 - **WHEN** a script runs with `--quiet`
@@ -97,6 +101,10 @@ The CLI SHALL accept output flags: `--quiet` suppresses all streaming render and
 #### Scenario: No-color degradation
 - **WHEN** a script runs with `--no-color`
 - **THEN** session output is still attributed by its text prefix but contains no ANSI escape sequences
+
+#### Scenario: Quiet still records the run
+- **WHEN** a script that prompts an agent runs with `--quiet`
+- **THEN** the terminal stays silent for that streaming output and the run's `log` file contains it
 
 ### Requirement: Rendered lines are timestamped
 Every rendered output line — agent message chunks, tool lines, plan summaries, context-usage lines, lifecycle diagnostics, `ptah.log` lines, and `-vv` agent stderr passthrough — SHALL be prefixed with a local-time timestamp shaped `yyyy-mm-dd HH:MM:SS` (space-separated), per the `render-logging` capability's timestamp contract, ahead of the session attribution prefix. Timestamps SHALL be always on: no flag controls them. `--no-color` SHALL keep the timestamp as plain text, and `--quiet` SHALL continue to suppress all rendered output. Script `print` output does not pass through the renderer and SHALL NOT be timestamped or otherwise modified.
