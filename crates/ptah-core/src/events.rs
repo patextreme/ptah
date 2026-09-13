@@ -27,10 +27,28 @@ pub enum SessionEvent {
     Plan { entries: Vec<PlanEntry> },
     /// Context-window usage report.
     Usage { used: u64, size: u64 },
+    /// A session became ready: the agent subprocess completed the ACP
+    /// handshake and `session/new` returned. Carries the structured
+    /// readiness facts — the session's `label`, its `agent` name (the
+    /// registry name, or the authored command for an inline spec), its
+    /// authored invocation shape (pre-interpolation `command`/`args`
+    /// and `env_keys`), and the agent-assigned `acp_id`. Sinks read
+    /// readiness from this event, not from rendered wording: the
+    /// renderer formats the ready line from these fields, so the line
+    /// is free to change without moving the facts.
+    SessionReady {
+        label: String,
+        agent: String,
+        command: String,
+        args: Vec<String>,
+        env_keys: Vec<String>,
+        acp_id: String,
+    },
     /// One line of agent subprocess stderr.
     StderrLine { line: String },
-    /// Runtime lifecycle diagnostic (session readiness, config changes,
-    /// typed-result setup, teardown notes).
+    /// Runtime lifecycle diagnostic (config changes, typed-result
+    /// setup, teardown notes). Session readiness rides its own
+    /// structured [`SessionEvent::SessionReady`] event, not this one.
     Lifecycle { message: String },
     /// A `ptah.exec` command started. Attributed to the script (the
     /// sink's reserved `"exec"` pseudo-label), not to any session.
@@ -120,4 +138,41 @@ pub enum PlanStatus {
     InProgress,
     Completed,
     Other,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_ready_carries_all_facts() {
+        // The structured readiness payload (render-logging "Session-ready
+        // line names the ACP session id"): every fact a sink needs is a
+        // separate field, never rendered wording.
+        let event = SessionEvent::SessionReady {
+            label: "mock/s1".to_string(),
+            agent: "mock".to_string(),
+            command: "mock-agent".to_string(),
+            args: vec!["--flag".to_string(), "${SECRET}".to_string()],
+            env_keys: vec!["TOKEN".to_string()],
+            acp_id: "acp-123".to_string(),
+        };
+        let SessionEvent::SessionReady {
+            label,
+            agent,
+            command,
+            args,
+            env_keys,
+            acp_id,
+        } = event
+        else {
+            panic!("expected SessionReady");
+        };
+        assert_eq!(label, "mock/s1");
+        assert_eq!(agent, "mock");
+        assert_eq!(command, "mock-agent");
+        assert_eq!(args, vec!["--flag".to_string(), "${SECRET}".to_string()]);
+        assert_eq!(env_keys, vec!["TOKEN".to_string()]);
+        assert_eq!(acp_id, "acp-123");
+    }
 }

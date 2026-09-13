@@ -4,6 +4,12 @@
 //! per-session ANSI color assigned round-robin from a small palette.
 //! `--no-color` drops the color codes; `--quiet` suppresses everything but
 //! script `print` output; `-vv` additionally passes agent stderr through.
+//!
+//! [`record`] is the adapter beside the renderer: the durable run record
+//! (`.ptah/runs/<id>/log` and `run.json`) and the fan-out sink that feeds
+//! both.
+
+pub mod record;
 
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
@@ -413,6 +419,13 @@ impl EventSink for Renderer {
             }
             SessionEvent::StderrLine { line } => self.agent_stderr(label, &line),
             SessionEvent::Lifecycle { message } => self.lifecycle(&message),
+            // Structured readiness: the renderer reconstructs the
+            // verbose-only ready line from the event's facts (never from
+            // the driver's wording). `agent`, `command`, `args`, and
+            // `env_keys` are the record sink's business here.
+            SessionEvent::SessionReady { label, acp_id, .. } => {
+                self.lifecycle(&format!("{label}: session ready (acp {acp_id})"));
+            }
             // Exec lifecycle: script-level `[ptah]` attribution (the
             // reserved "exec" pseudo-label marks these events at the
             // sink boundary; the label itself is not rendered).
@@ -675,6 +688,45 @@ mod tests {
         let text = out.text();
         assert!(!text.contains('\u{1b}'), "no ANSI escapes: {text:?}");
         assert!(text.contains("[ptah] ask 1 main.luau: Proceed?"), "{text}");
+    }
+
+    #[test]
+    fn session_ready_renders_verbose_only() {
+        // render-logging "Session-ready line names the ACP session id":
+        // the renderer reconstructs the line from the structured event
+        // (verbose-only, `{label}: session ready (acp {id})`).
+        let event = || SessionEvent::SessionReady {
+            label: "mock/s1".into(),
+            agent: "mock".into(),
+            command: "mock-agent".into(),
+            args: vec!["--flag".into()],
+            env_keys: vec!["TOKEN".into()],
+            acp_id: "acp-123".into(),
+        };
+
+        let out = SharedOut::default();
+        let renderer = Renderer::with_writer(
+            RenderOptions {
+                verbose: true,
+                ..RenderOptions::default()
+            },
+            out.clone(),
+        );
+        renderer.emit("mock/s1", event());
+        let stripped = crate_test_strip(&out.text());
+        assert!(
+            stripped.contains("[ptah] mock/s1: session ready (acp acp-123)"),
+            "{stripped}"
+        );
+
+        let out = SharedOut::default();
+        let renderer = Renderer::with_writer(RenderOptions::default(), out.clone());
+        renderer.emit("mock/s1", event());
+        assert!(
+            !out.text().contains("session ready"),
+            "default mode must suppress the line: {}",
+            out.text()
+        );
     }
 
     /// Strip the leading `yyyy-mm-dd HH:MM:SS ` timestamp from every

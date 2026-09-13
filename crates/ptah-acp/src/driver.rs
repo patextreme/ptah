@@ -55,7 +55,13 @@ async fn start_session_inner(
     sink: Arc<dyn EventSink>,
     groups: Option<Arc<ProcessGroups>>,
 ) -> Result<SessionHandle, SessionError> {
-    let proc = process::spawn(spec, &opts.label, sink.clone(), groups.as_ref())?;
+    let proc = process::spawn(
+        spec,
+        &opts.authored_command,
+        &opts.label,
+        sink.clone(),
+        groups.as_ref(),
+    )?;
     let process::AgentProcess {
         stdin,
         stdout,
@@ -237,15 +243,11 @@ async fn start_session_inner(
                         if let Some(options) = hs.config_options {
                             *driver_config.lock().unwrap() = options;
                         }
-                        driver_sink.emit(
-                            &driver_label,
-                            SessionEvent::Lifecycle {
-                                message: format!(
-                                    "{driver_label}: session ready (acp {})",
-                                    hs.session_id
-                                ),
-                            },
-                        );
+                        // No rendered readiness line here: the scripting
+                        // layer emits the structured `SessionReady` event
+                        // once the handle exists, and the renderer
+                        // formats the verbose-only line from it. The
+                        // ready handshake below still gates `start_session`.
                         let _ = ready_tx.send(Ok(hs.session_id.clone()));
                         run_command_loop(
                             &conn,

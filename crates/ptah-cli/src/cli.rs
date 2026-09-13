@@ -9,10 +9,11 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 use crate::ask::{StdinAskProvider, stdin_is_tty, stdout_is_tty};
+use crate::render::record::{FanOut, RunEnd, RunRecord, run_start_line, runs_dir};
 use crate::render::{RenderOptions, Renderer};
 use crate::script::{self, RunConfig};
 use ptah_core::config::AskProviderKind;
-use ptah_core::ports::{ConfigSource, InteractionMode};
+use ptah_core::ports::{ConfigSource, EventSink, InteractionMode};
 
 /// clap value parser over [`AskProviderKind`] — unknown values are
 /// usage errors (exit 2) naming the accepted set (the same string
@@ -559,6 +560,18 @@ fn run_check(script: PathBuf, no_color: bool, ask: Option<AskProviderKind>) -> E
     ExitCode::from(code)
 }
 
+/// One warning for a run record that could not be written: creation failed,
+/// its `log` could not be opened, or a mid-run write failed. It names the
+/// reason and the location, prints even under `--quiet` (it reports a missing
+/// artifact, and silence there is the failure mode the record exists to
+/// remove), and never changes the run's behavior or exit code.
+fn warn_record_failure(location: &std::path::Path, reason: &str) {
+    eprintln!(
+        "warning: run record unavailable at {}: {reason}",
+        location.display()
+    );
+}
+
 /// Entry point: returns the process exit code.
 pub fn main() -> ExitCode {
     let mut args: Vec<String> = vec!["ptah".to_string()];
@@ -655,7 +668,73 @@ pub fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let renderer = std::sync::Arc::new(Renderer::new(render_opts));
+    // Run record: mint the run id and create `<project>/.ptah/runs/<id>/`
+    // before the renderers exist. Best-effort: when the record cannot be
+    // created the run proceeds without one, having warned once to stderr.
+    // This sits after pre-flight so a run that fails pre-flight leaves no
+    // record, and no other command reaches this code at all.
+    let mut record: Option<std::sync::Arc<RunRecord>> =
+        match RunRecord::create(&invocation_dir, &script, &args) {
+            Ok(record) => Some(std::sync::Arc::new(record)),
+            Err(e) => {
+                warn_record_failure(&runs_dir(&invocation_dir), &e.to_string());
+                None
+            }
+        };
+
+    // Two renderers behind one fan-out sink: the terminal renderer built from
+    // the run's flags, and the record renderer (the terminal's verbosity, but
+    // never silenced and never colored). The record model is the third sink,
+    // keeping `run.json` current from the structured events. The fan-out is
+    // the single `Arc<dyn EventSink>` the runtime is handed. The terminal and
+    // record `Renderer` handles are kept as `Arc`s so the composition root can
+    // emit the run-start line on each directly — it is not a session event, so
+    // the fan-out cannot carry it.
+    let terminal_renderer = std::sync::Arc::new(Renderer::new(render_opts));
+    let mut sinks: Vec<std::sync::Arc<dyn EventSink>> = vec![terminal_renderer.clone()];
+    // Open the record's `log` before any event can be rendered, so the
+    // record is either complete (directory + ignore + `run.json` + `log`) or
+    // absent.
+    let log_renderer: Option<std::sync::Arc<Renderer>> = match record.as_ref() {
+        Some(r) => match r.log_renderer(render_opts) {
+            Ok(renderer) => Some(std::sync::Arc::new(renderer)),
+            Err(e) => {
+                warn_record_failure(r.dir(), &e.to_string());
+                None
+            }
+        },
+        None => None,
+    };
+    // A record without its `log` is not a record: leave none behind.
+    if log_renderer.is_none()
+        && let Some(r) = record.take()
+    {
+        let _ = std::fs::remove_dir_all(r.dir());
+    }
+    if let Some(log_renderer) = &log_renderer {
+        sinks.push(log_renderer.clone());
+    }
+    if let Some(r) = &record {
+        sinks.push(r.clone());
+    }
+    // Run-start line: exactly one `ptah`-attributed line naming the record
+    // directory, emitted only after the record (and its `log`) exist and
+    // before the runtime can render anything. `exec_line`'s gate shows it in
+    // every non-quiet terminal mode; `--quiet` suppresses it there while the
+    // record renderer (`quiet: false`) still writes it to `log`. When there is
+    // no record, the failure warning has already taken its place.
+    if let Some(r) = &record {
+        let line = run_start_line(
+            r.dir(),
+            &invocation_dir,
+            std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        );
+        terminal_renderer.exec_line(&line);
+        if let Some(log_renderer) = &log_renderer {
+            log_renderer.exec_line(&line);
+        }
+    }
+    let renderer: std::sync::Arc<dyn EventSink> = std::sync::Arc::new(FanOut::new(sinks));
     // The composition line change ② moved out of the script crate: the
     // ACP stdio adapter is chosen here, at the composition root, and
     // injected through the `AgentTransport` port. The process runner is
@@ -715,6 +794,25 @@ pub fn main() -> ExitCode {
         }
         outcome
     });
+
+    // Terminal transition: close the record with how the run ended
+    // (cancellation from the runtime's own report, never inferred from the
+    // exit code). A signal therefore records `cancelled` while
+    // `ptah.exit(130)` records `failed`. A record that failed a write
+    // mid-run is already disabled, so this is a no-op for it.
+    if let Some(record) = &record {
+        let _ = record.finish(&RunEnd {
+            code: outcome.code,
+            error: outcome.error.clone(),
+            undelivered_errors: outcome.undelivered_errors.clone(),
+            cancelled: outcome.cancelled,
+        });
+        // Exactly one warning for a record that went unwritable after it was
+        // created; the run's exit code and behavior are untouched.
+        if let Some(reason) = record.take_failure() {
+            warn_record_failure(record.dir(), &reason);
+        }
+    }
 
     if let Some(error) = &outcome.error {
         eprintln!("error: {error}");

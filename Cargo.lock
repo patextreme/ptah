@@ -3256,8 +3256,12 @@ dependencies = [
 name = "ptah-render"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "jiff",
  "ptah-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -24,6 +24,9 @@ fn opts(label: &str) -> SessionOptions {
         cwd: std::env::temp_dir(),
         mcp_servers: vec![],
         label: label.to_string(),
+        // Tests that expect a spawn failure set this to the command so the
+        // error names it; other tests never render the spawn diagnostic.
+        authored_command: String::new(),
         result: None,
     }
 }
@@ -68,7 +71,9 @@ async fn spawn_env_is_merged_over_inherited() {
 async fn spawn_failure_fails_fast_naming_command() {
     let mut spec = AgentSpec::new("/nonexistent/ptah-test-agent");
     spec.args = vec!["--flag".into()];
-    let err = start_session(&spec, opts("bad/cmd"), quiet_renderer())
+    let mut options = opts("bad/cmd");
+    options.authored_command = spec.command.clone();
+    let err = start_session(&spec, options, quiet_renderer())
         .await
         .expect_err("spawn must fail");
     assert!(
