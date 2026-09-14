@@ -60,7 +60,7 @@ ptah package update
 ptah --version
 ```
 
-- `--quiet` — suppress streaming render and diagnostics (script `print` still passes; ask prompts still render — they are required interaction, not noise)
+- `--quiet` — suppress streaming render and diagnostics **on the terminal** (script `print` still passes; ask prompts still render — they are required interaction, not noise; the [run record](#run-records) still receives everything)
 - `--verbose` — runtime lifecycle diagnostics
 - `-vv` — additionally pass agent subprocess stderr through
 - `--no-color` — drop ANSI colors, keep `[agent/session]` text prefixes
@@ -145,8 +145,9 @@ local wall-clock timestamp and the session attribution:
 
 - Timestamps are always on (no flag): local `yyyy-mm-dd HH:MM:SS`, dimmed
   under color, plain text with `--no-color`. `--quiet` suppresses rendered
-  output as before. Script `print` bypasses the renderer and is emitted
-  verbatim.
+  output on the terminal (the run's record still receives it — see
+  [Run records](#run-records)). Script `print` bypasses the renderer and is
+  emitted verbatim.
 - Every prompt renders one `prompt:` line at send time: the prompt text
   with whitespace runs collapsed to single spaces, truncated to a
   120-visible-char budget with a trailing `…` when cut. Suppressed by
@@ -167,6 +168,91 @@ local wall-clock timestamp and the session attribution:
   announcement. `pending` announcements and repeated identical statuses
   render nothing, so agents that resend the same status cannot flood the
   log.
+
+## Run records
+
+Every `ptah run` mints a run id — the UTC start instant as `yyyymmddhhmmss`
+plus a short random suffix, `20260912143224-4821`, so a directory listing
+sorts chronologically (runs that start in the same second tie on the prefix
+and their suffix order is unspecified) — and writes a **run record** under
+the project's `.ptah/runs/<run id>/`:
+
+| Path | Contents |
+|---|---|
+| `.ptah/runs/.gitignore` | `*` — created with the first record, never modified |
+| `.ptah/runs/<id>/log` | ptah's rendered stream for that run |
+| `.ptah/runs/<id>/run.json` | the run's identity, shape, sessions, and asks |
+
+The project is the nearest ancestor of the invocation directory containing a
+`.ptah/` directory, falling back to the invocation directory itself; there
+is no global or overridable state location. `.ptah/runs/` self-ignores, so a
+workflow's routine `git add -A` never stages a record even though the rest
+of a tracked `.ptah/` may be committed. A run whose ignore file cannot be
+written gets no record at all.
+
+A run-start line names the record at default verbosity, so you need not
+look for it:
+
+```
+2026-09-12 14:32:24 [ptah] run record: .ptah/runs/20260912143224-4821
+```
+
+### `log` is the rendered stream, not a stdout capture
+
+`log` holds ptah's rendered output for the run: every line the terminal
+shows at the run's verbosity, plus the lines `--quiet` suppressed and the
+ask lines that always render. **`--quiet` governs the terminal, never the
+record** — an operator silencing their terminal is not asking to be
+un-auditable. The file carries no ANSI escapes and is flushed per line, so
+an abnormally killed run keeps every line it had finished. Each stream is
+written by its own renderer, so a line straddling a second boundary can
+differ by up to a second between the terminal and the file.
+
+Because `log` is the renderer's stream, it is **not a stdout capture**:
+script `print` bypasses the renderer and appears on the terminal (and in a
+shell redirect) but never in `log`, and ptah's standard error (pre-flight
+findings, terminal error reports) is excluded too. A script that wants its
+own output in the durable record calls `ptah.log`, which is on the sink and
+so lands in both streams. `ptah run main.luau > out.log` and the record are
+therefore not interchangeable.
+
+### `run.json`
+
+`run.json` is rewritten atomically as facts arrive — at run start, when each
+session becomes ready, when an ask is issued and when it resolves, and at
+every run end including signal teardown — so a reader never observes a
+partial file, and a run killed without teardown (SIGKILL, or a second
+SIGINT/SIGTERM) still names its script, argv, invocation directory, start
+instant, and the sessions that had started. It carries a `schema_version`,
+the run id, the entry script and process argv, the invocation directory, the
+ptah version, start and end instants in UTC, the status, the exit code, the
+terminal error when there was one, each started session's label, agent name,
+authored invocation shape, and ACP session id, and each ask's ordinal,
+prompt, details, and resolution. Only agents whose sessions actually started
+appear.
+
+`status` is derived from how the process ended, never from what the script
+intended: `ok` (exit 0), `failed` (non-zero exit, so `ptah.exit(130)` is a
+failure rather than a cancellation), `cancelled` (the runtime reports a
+terminating signal), or `running` (no end yet — also the honest state of a
+force-killed run).
+
+Recording never fails a run. When the record location is unwritable the
+script runs normally with a single warning on stderr naming the location,
+printed even under `--quiet`; a mid-run write failure disables the record,
+warns once, and never changes the run's behavior or exit code. `check`,
+`types`, `init`, and `package` create no records, and a run that fails
+pre-flight leaves none.
+
+> **Security.** `run.json` is the most secret-bearing file ptah writes: it
+> holds prompts, ask details, and the operator's own ask answers (`log` can
+> carry prompt and agent text too). Its protection is the self-ignoring
+> `.ptah/runs/.gitignore`, created atomically with the record — keep that
+> file, and treat record contents as sensitive. ptah pins invocation
+> *shape*, never secrets: session `command`/`args` are recorded as authored,
+> **before** `${VAR}` interpolation, and `env` contributes key **names**
+> only, never values — a resolved arg list that contains an API key is never
+> persisted through this channel.
 
 ## Agent registry
 

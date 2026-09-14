@@ -437,16 +437,13 @@ end
 
 A human answering an ask may need to inspect the session on the agent
 side (ptah renders no transcripts and cannot resume a session itself).
-Compose `session:sessionId()` into the details so they can correlate —
-any wording works, there is no canonical key:
-
-```lua
---!strict
-local answer = ptah.ask({
-	prompt = "Unblock the review session?",
-	details = "session " .. s:label() .. " (agent-side id: " .. s:sessionId() .. ")",
-})
-```
+The run record already carries the correlation, so do not hand-embed
+ids into `details`: `.ptah/runs/<run id>/run.json` lists every started
+session's label, agent name, and agent-assigned ACP session id beside
+each ask's prompt, details, and resolution, and the same record's `log`
+holds the rendered ask lines. Reach for `session:sessionId()` only when
+a script genuinely needs the id itself (say, building an agent-side
+resume command).
 
 ## Typed results, details
 

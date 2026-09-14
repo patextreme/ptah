@@ -103,6 +103,7 @@ pub async fn run(cfg: RunConfig) -> RunOutcome {
                 code: 1,
                 error: Some(format!("failed to initialize script environment: {e}")),
                 undelivered_errors: vec![],
+                cancelled: false,
             };
         }
     };
@@ -119,6 +120,7 @@ pub async fn run(cfg: RunConfig) -> RunOutcome {
                 code: 1,
                 error: Some(format!("cannot read script {}: {e}", script_path.display())),
                 undelivered_errors: vec![],
+                cancelled: false,
             };
         }
     };
@@ -151,6 +153,7 @@ pub async fn run(cfg: RunConfig) -> RunOutcome {
                 code,
                 error: None,
                 undelivered_errors: vec![],
+                cancelled: true,
             };
         }
         End::Script(result) => result,
@@ -167,6 +170,7 @@ pub async fn run(cfg: RunConfig) -> RunOutcome {
                     code: sig.code,
                     error: None,
                     undelivered_errors: vec![],
+                    cancelled: false,
                 };
             }
             // Uncaught script error: cancel in-flight turns, tear down, exit 1.
@@ -175,6 +179,7 @@ pub async fn run(cfg: RunConfig) -> RunOutcome {
                 code: 1,
                 error: Some(task::display_error(&e)),
                 undelivered_errors: vec![],
+                cancelled: false,
             };
         }
     }
@@ -187,6 +192,7 @@ pub async fn run(cfg: RunConfig) -> RunOutcome {
             code,
             error: None,
             undelivered_errors: vec![],
+            cancelled: true,
         };
     }
 
@@ -197,6 +203,7 @@ pub async fn run(cfg: RunConfig) -> RunOutcome {
             code,
             error: None,
             undelivered_errors: vec![],
+            cancelled: false,
         };
     }
 
@@ -212,6 +219,7 @@ pub async fn run(cfg: RunConfig) -> RunOutcome {
             code,
             error: None,
             undelivered_errors: vec![],
+            cancelled: true,
         };
     }
 
@@ -221,6 +229,7 @@ pub async fn run(cfg: RunConfig) -> RunOutcome {
         code: i32::from(!undelivered.is_empty()),
         error: None,
         undelivered_errors: undelivered,
+        cancelled: false,
     }
 }
 
@@ -245,5 +254,112 @@ fn shutdown_fired(shutdown: &Option<tokio::sync::watch::Receiver<i32>>) -> Optio
     match rx.has_changed() {
         Ok(true) => Some(*rx.borrow()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `RunOutcome::cancelled` distinguishes an outer cancellation
+    //! signal (SIGINT/SIGTERM) from a script that chose a signal's exit
+    //! code via `ptah.exit(130)`.
+
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use ptah_core::config::{AgentSpec, Registry};
+    use ptah_core::events::SessionEvent;
+    use ptah_core::ports::{AgentTransport, EventSink, InteractionMode};
+    use ptah_core::session::{SessionError, SessionHandle, SessionOptions};
+
+    use super::run;
+    use crate::state::RunConfig;
+
+    /// A transport whose handshake never completes: it holds a script
+    /// pending so a pre-fired shutdown deterministically wins the
+    /// `select!` (only the cancel branch is ready).
+    struct PendingTransport;
+
+    impl AgentTransport for PendingTransport {
+        fn start_session<'a>(
+            &'a self,
+            _spec: &'a AgentSpec,
+            _opts: SessionOptions,
+            _sink: Arc<dyn EventSink>,
+        ) -> Pin<Box<dyn Future<Output = Result<SessionHandle, SessionError>> + 'a>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[derive(Default)]
+    struct NullSink;
+
+    impl EventSink for NullSink {
+        fn emit(&self, _label: &str, _event: SessionEvent) {}
+        fn script_log(&self, _message: &str) {}
+    }
+
+    fn config(
+        dir: &std::path::Path,
+        body: &str,
+        shutdown: Option<tokio::sync::watch::Receiver<i32>>,
+    ) -> RunConfig {
+        let script = dir.join("main.luau");
+        std::fs::write(&script, body).unwrap();
+        RunConfig {
+            script_path: script,
+            invocation_dir: dir.to_path_buf(),
+            registry: Registry::default(),
+            transport: Arc::new(PendingTransport),
+            process_runner: None,
+            interaction: InteractionMode::Unresolved,
+            shutdown,
+            renderer: Arc::new(NullSink),
+            env: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_flag_is_set_only_on_the_cancel_path() {
+        // A signal that already arrived: the run is terminated while the
+        // script is still waiting on a session handshake.
+        let (tx, rx) = tokio::sync::watch::channel(0);
+        tx.send(130).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = tokio::task::LocalSet::new()
+            .run_until(run(config(
+                dir.path(),
+                "ptah.agent({ command = \"pending\" }):session()",
+                Some(rx),
+            )))
+            .await;
+        assert_eq!(outcome.code, 130);
+        assert!(outcome.cancelled, "cancel path sets the flag: {outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn completed_run_is_not_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = tokio::task::LocalSet::new()
+            .run_until(run(config(dir.path(), "", None)))
+            .await;
+        assert_eq!(outcome.code, 0, "error: {:?}", outcome.error);
+        assert!(!outcome.cancelled);
+    }
+
+    #[tokio::test]
+    async fn explicit_signal_code_is_not_cancelled() {
+        // `ptah.exit(130)` is a deliberate failure, not a signal — the
+        // distinction the flag exists for.
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = tokio::task::LocalSet::new()
+            .run_until(run(config(dir.path(), "ptah.exit(130)", None)))
+            .await;
+        assert_eq!(outcome.code, 130);
+        assert!(
+            !outcome.cancelled,
+            "explicit exit is not a cancel: {outcome:?}"
+        );
     }
 }

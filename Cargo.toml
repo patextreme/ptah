@@ -40,6 +40,11 @@ jsonschema = { version = "0.50", default-features = false }
 # /etc/localtime / TZ), pure Rust, wrapped behind one helper.
 jiff = { version = "0.2", default-features = false, features = ["tz-system"] }
 tempfile = "3"
+# Randomness behind the run record's short id suffix: a decimal collision
+# breaker, not a security primitive. Already resolved in the lock via
+# pesde's gix/tempfile/uuid stack; declared explicitly so the edge is
+# honest rather than implicit.
+getrandom = "0.4"
 # The embedded package engine (`ptah package`). Pinned exact: pesde is
 # 0.x with breaking releases and no library-stability promise, and the
 # ptah-pesde adapter confines every pesde type behind its own API so a

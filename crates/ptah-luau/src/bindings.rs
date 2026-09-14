@@ -247,16 +247,26 @@ fn flatten_select_options(
     }
 }
 
-fn new_agent_factory(lua: &Lua, name: String, spec: AgentSpec) -> mlua::Result<Table> {
+fn new_agent_factory(
+    lua: &Lua,
+    name: String,
+    agent_name: String,
+    spec: AgentSpec,
+    authored: AgentSpec,
+) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     let name_rc = Rc::new(name);
+    let agent_name_rc = Rc::new(agent_name);
     let spec_rc = Rc::new(spec);
+    let authored_rc = Rc::new(authored);
     let counter = Rc::new(Cell::new(0u64));
     t.set(
         "session",
         lua.create_async_function(move |lua, (_self, opts): (Table, Option<Table>)| {
             let name = name_rc.clone();
+            let agent_name = agent_name_rc.clone();
             let spec = spec_rc.clone();
+            let authored = authored_rc.clone();
             let counter = counter.clone();
             async move {
                 let state = runtime_state(&lua)?;
@@ -349,6 +359,7 @@ fn new_agent_factory(lua: &Lua, name: String, spec: AgentSpec) -> mlua::Result<T
                             cwd,
                             mcp_servers,
                             label: label.clone(),
+                            authored_command: authored.command.clone(),
                             result,
                         },
                         state.sink.clone(),
@@ -356,6 +367,25 @@ fn new_agent_factory(lua: &Lua, name: String, spec: AgentSpec) -> mlua::Result<T
                     .await
                     .map_err(|e| mlua::Error::runtime(e.to_string()))?;
                 state.sessions.borrow_mut().push(handle.clone());
+
+                // Readiness is a structured fact, emitted once the
+                // handle exists (the only site holding the label, the
+                // agent name, the authored shape, and the ACP id at
+                // once). The record sink reads these fields; the
+                // renderer formats the verbose-only ready line from
+                // them. The authored shape is pre-interpolation, so no
+                // `${VAR}` secret value rides the event.
+                state.sink.emit(
+                    &label,
+                    SessionEvent::SessionReady {
+                        label: label.clone(),
+                        agent: (*agent_name).clone(),
+                        command: authored.command.clone(),
+                        args: authored.args.clone(),
+                        env_keys: authored.env.keys().cloned().collect(),
+                        acp_id: handle.session_id.clone(),
+                    },
+                );
 
                 new_session_obj(&lua, handle)
             }
@@ -373,23 +403,54 @@ pub(super) fn bind_ptah(lua: &Lua) -> mlua::Result<()> {
     // ptah.agent(name_or_spec)
     let agent = lua.create_async_function(|lua, spec: Value| async move {
         let state = runtime_state(&lua)?;
-        let resolved = match &spec {
+        // Four facts travel together to the factory: the label prefix
+        // (`name`), the agent name the record carries (`agent_name`),
+        // the resolved spec actually spawned, and the authored
+        // (pre-interpolation) spec the record reads. Both the label
+        // prefix and the agent name are authored: for a named agent
+        // that is the registry name, and for an inline spec the
+        // authored command — so a `${VAR}` in an inline command can
+        // never carry its resolved value into a rendered label or the
+        // run record.
+        let (name, agent_name, resolved, authored) = match &spec {
             Value::String(name) => {
                 let name = name.to_str()?.to_string();
-                state
+                let resolved = state
                     .registry
                     .resolve_with(&name, &interp_lookup)
-                    .map_err(|e| mlua::Error::runtime(e.to_string()))?
+                    .map_err(|e| mlua::Error::runtime(e.to_string()))?;
+                // The authored spec is the pre-interpolation view;
+                // `resolve_with` above may have substituted `${VAR}`
+                // with secret values. A successful resolve guarantees
+                // a registry entry, so the raw accessor is Some.
+                let authored = state
+                    .registry
+                    .raw(&name)
+                    .cloned()
+                    .unwrap_or_else(|| resolved.clone());
+                (name.clone(), name, resolved, authored)
             }
             Value::Table(t) => {
                 let args: Option<Vec<String>> = t.get("args")?;
                 let env: Option<std::collections::BTreeMap<String, String>> = t.get("env")?;
-                AgentSpec {
+                let authored = AgentSpec {
                     command: t.get("command")?,
                     args: args.unwrap_or_default(),
                     env: env.unwrap_or_default(),
-                }
-                .interpolate(&interp_lookup)
+                };
+                let resolved = authored.interpolate(&interp_lookup);
+                // An inline spec has no registry name: the authored
+                // command prefixes the label and names the agent in the
+                // record. It is the *authored* command, not the resolved
+                // one, so a templated `command = "${VAR}"` never leaks
+                // its value into a rendered label or `run.json` (the
+                // record's secrets rule).
+                (
+                    authored.command.clone(),
+                    authored.command.clone(),
+                    resolved,
+                    authored,
+                )
             }
             other => {
                 // mlua's `BadArgument::cause` is an `Arc<Error>`; without the
@@ -407,11 +468,7 @@ pub(super) fn bind_ptah(lua: &Lua) -> mlua::Result<()> {
                 });
             }
         };
-        let name = match &spec {
-            Value::String(name) => name.to_str()?.to_string(),
-            _ => resolved.command.clone(),
-        };
-        new_agent_factory(&lua, name, resolved)
+        new_agent_factory(&lua, name, agent_name, resolved, authored)
     })?;
     ptah.set("agent", agent)?;
 
@@ -906,6 +963,123 @@ mod tests {
         fn script_log(&self, message: &str) {
             self.0.lock().unwrap().push(message.to_string());
         }
+    }
+
+    /// Captures every emitted event with its label (`SessionReady`
+    /// assertions).
+    #[derive(Default)]
+    struct EventRecordingSink(Mutex<Vec<(String, SessionEvent)>>);
+
+    impl EventSink for EventRecordingSink {
+        fn emit(&self, label: &str, event: SessionEvent) {
+            self.0.lock().unwrap().push((label.to_string(), event));
+        }
+        fn script_log(&self, _message: &str) {}
+    }
+
+    #[tokio::test]
+    async fn session_ready_carries_authored_shape_and_acp_id() {
+        // render-logging "Session-ready line names the ACP session id":
+        // readiness is a structured event carrying the label, the agent
+        // name, the authored (pre-interpolation) command/args/env key
+        // names, and the agent-assigned ACP id.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("main.luau");
+        std::fs::write(
+            &script,
+            r#"local named = ptah.agent("mock"):session({ id = "n" })
+local inline = ptah.agent({
+    command = "loopback-inline",
+    args = { "--key", "${PTAH_TEST_UNRESOLVED}" },
+    env = { TOKEN = "${PTAH_TEST_UNRESOLVED}" },
+}):session({ id = "i" })
+"#,
+        )
+        .unwrap();
+
+        let registry = Registry::from_layers(
+            None,
+            Some(ptah_core::config::RegistryLayer {
+                agents: std::collections::BTreeMap::from([(
+                    "mock".to_string(),
+                    ptah_core::config::AgentSpec {
+                        command: "loopback-named".to_string(),
+                        args: vec!["${PTAH_TEST_UNRESOLVED}".to_string()],
+                        env: std::collections::BTreeMap::from([(
+                            "TOKEN".to_string(),
+                            "${PTAH_TEST_UNRESOLVED}".to_string(),
+                        )]),
+                    },
+                )]),
+                ask: None,
+            }),
+        );
+
+        let sink = Arc::new(EventRecordingSink::default());
+        let cfg = RunConfig {
+            script_path: script,
+            invocation_dir: dir.path().to_path_buf(),
+            registry,
+            transport: Arc::new(LoopbackTransport::default()),
+            process_runner: None,
+            interaction: InteractionMode::Unresolved,
+            shutdown: None,
+            renderer: sink.clone(),
+            env: Default::default(),
+        };
+        let outcome = tokio::task::LocalSet::new().run_until(run(cfg)).await;
+        assert_eq!(outcome.code, 0, "error: {:?}", outcome.error);
+
+        let events = sink.0.lock().unwrap().clone();
+        let ready: Vec<&SessionEvent> = events
+            .iter()
+            .map(|(_, event)| event)
+            .filter(|event| matches!(event, SessionEvent::SessionReady { .. }))
+            .collect();
+        assert_eq!(ready.len(), 2, "one ready event per session: {events:?}");
+
+        // Named agent: the registry name, the authored spec, and the
+        // ACP id the transport handed back.
+        let SessionEvent::SessionReady {
+            label,
+            agent,
+            command,
+            args,
+            env_keys,
+            acp_id,
+        } = ready[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(label, "mock/n");
+        assert_eq!(agent, "mock");
+        assert_eq!(command, "loopback-named");
+        assert_eq!(args, &vec!["${PTAH_TEST_UNRESOLVED}".to_string()]);
+        assert_eq!(env_keys, &vec!["TOKEN".to_string()]);
+        assert_eq!(acp_id, "acp-session-1");
+
+        // Inline spec: the authored command names the agent, and the
+        // authored table values (not the interpolated ones) round-trip.
+        let SessionEvent::SessionReady {
+            label,
+            agent,
+            command,
+            args,
+            env_keys,
+            acp_id,
+        } = ready[1]
+        else {
+            unreachable!()
+        };
+        assert_eq!(label, "loopback-inline/i");
+        assert_eq!(agent, "loopback-inline");
+        assert_eq!(command, "loopback-inline");
+        assert_eq!(
+            args,
+            &vec!["--key".to_string(), "${PTAH_TEST_UNRESOLVED}".to_string()]
+        );
+        assert_eq!(env_keys, &vec!["TOKEN".to_string()]);
+        assert_eq!(acp_id, "acp-session-2");
     }
 
     #[tokio::test]

@@ -190,6 +190,15 @@ impl Registry {
         }
     }
 
+    /// The authored (pre-interpolation) spec for an agent, when it is
+    /// registered. Unlike [`Registry::resolve`]/[`Registry::resolve_with`],
+    /// which substitute `${VAR}` eagerly, this returns the spec exactly
+    /// as written — the view a caller needs when a resolved value would
+    /// carry a secret (the run record's `command`/`args`).
+    pub fn raw(&self, name: &str) -> Option<&AgentSpec> {
+        self.agents.get(name)
+    }
+
     /// Names of all registered agents.
     pub fn agent_names(&self) -> Vec<String> {
         self.agents.keys().cloned().collect()
@@ -305,6 +314,44 @@ mod tests {
             err.to_string().contains("claude"),
             "error must name the agent: {err}"
         );
+    }
+
+    #[test]
+    fn raw_returns_authored_text_while_resolve_interpolates() {
+        // The secrets boundary: `raw` is the pre-interpolation view the
+        // run record reads, while `resolve` substitutes `${VAR}`.
+        let reg = Registry::from_layers(
+            None,
+            Some(RegistryLayer {
+                agents: BTreeMap::from([(
+                    "api".to_string(),
+                    spec(
+                        "${BIN}",
+                        &["--key", "${ANTHROPIC_API_KEY}"],
+                        &[("TOKEN", "${ANTHROPIC_API_KEY}")],
+                    ),
+                )]),
+                ask: None,
+            }),
+        );
+
+        let authored = reg.raw("api").expect("registered agent");
+        assert_eq!(authored.command, "${BIN}");
+        assert_eq!(authored.args, vec!["--key", "${ANTHROPIC_API_KEY}"]);
+        assert_eq!(authored.env["TOKEN"], "${ANTHROPIC_API_KEY}");
+
+        let resolved = reg
+            .resolve_with("api", &|var| match var {
+                "BIN" => Some("/usr/local/bin/agent".into()),
+                "ANTHROPIC_API_KEY" => Some("sk-secret".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(resolved.command, "/usr/local/bin/agent");
+        assert_eq!(resolved.args, vec!["--key", "sk-secret"]);
+        assert_eq!(resolved.env["TOKEN"], "sk-secret");
+
+        assert!(reg.raw("missing").is_none());
     }
 
     #[test]
