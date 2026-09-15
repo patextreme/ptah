@@ -77,3 +77,14 @@ The `log` file inside a run record: the rendered stream as ptah prints it,
 a superset of what the terminal showed.
 _Avoid_: out.log, output file, stdout capture, transcript (reserved for the
 deferred per-session ACP material)
+
+**Enclave ignore**:
+The `*` ignore file a wholly generated directory writes inside itself
+(`.ptah/runs/.gitignore`); the directory's own writer owns the rule.
+_Avoid_: self-ignoring file (that describes the behavior, not the mechanism)
+
+**Managed ignore section**:
+A marker-delimited block in a user-owned ignore file that ptah treats as
+derived content: refreshed between the markers, with content outside the
+markers never touched (`.ptah/.gitignore`'s block).
+_Avoid_: gitignore scaffold, generated ignore file
