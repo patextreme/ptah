@@ -462,23 +462,40 @@ const MANAGED_IGNORE_CLOSING: &str = "# <<< ptah";
 /// would also match the linker's nested `luau_packages/.pesde/`.
 const MANAGED_IGNORE_BODY: &str = "/luau_packages/\n/.pesde/\n";
 
-/// Opening-marker recognition: a line whose bytes begin with
-/// `# >>> ptah`.
-fn is_managed_opening(line: &[u8]) -> bool {
-    line.starts_with(MANAGED_IGNORE_OPENING_PREFIX.as_bytes())
+/// Strip one trailing carriage return so a CRLF line recognizes the
+/// same markers as an LF line. CRLF is a line-ending encoding, not
+/// content: without this, the opening marker (a prefix match) would
+/// still register while the CRLF closing marker would not, leaving a
+/// half-open pair whose later refresh spans user content (f2). Only
+/// recognition is normalized; the bytes written outside the markers
+/// are always left as found.
+fn trim_carriage_return(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
-/// Closing-marker recognition: the exact line `# <<< ptah`.
+/// Opening-marker recognition: a line whose bytes begin with
+/// `# >>> ptah` (a trailing `\r` from a CRLF file is ignored).
+fn is_managed_opening(line: &[u8]) -> bool {
+    trim_carriage_return(line).starts_with(MANAGED_IGNORE_OPENING_PREFIX.as_bytes())
+}
+
+/// Closing-marker recognition: the exact line `# <<< ptah` (a trailing
+/// `\r` from a CRLF file is ignored).
 fn is_managed_closing(line: &[u8]) -> bool {
-    line == MANAGED_IGNORE_CLOSING.as_bytes()
+    trim_carriage_return(line) == MANAGED_IGNORE_CLOSING.as_bytes()
 }
 
 /// Locate the first managed section in `existing`: the byte offsets
-/// strictly between the first opening marker and the first closing
-/// marker after it, returned as `(body_start, body_end)`. `None` when
-/// the pair is incomplete (no opening, or no closing after it), which
-/// reads as unmarked — the section is appended. Degenerate later pairs
-/// are left alone (design D5).
+/// strictly between the first closing marker and the nearest opening
+/// marker preceding it, returned as `(body_start, body_end)`. `None`
+/// when no closing marker has an opening marker before it, which reads
+/// as unmarked — the section is appended. Pairing each closing with its
+/// *nearest* preceding opening (rather than the first opening in the
+/// file) keeps a stray, unmatched opening line — a user note that
+/// happens to begin `# >>> ptah` — from widening the rewrite span
+/// across user content once an appended section's closing marker
+/// appears on a later run (f1). Later pairs after the first closing are
+/// left alone (design D5).
 fn managed_section_bounds(existing: &[u8]) -> Option<(usize, usize)> {
     let mut open_after: Option<usize> = None;
     let mut i = 0usize;
@@ -488,16 +505,14 @@ fn managed_section_bounds(existing: &[u8]) -> Option<(usize, usize)> {
             Some(p) => (&rest[..p], i + p + 1),
             None => (rest, existing.len()),
         };
-        match open_after {
-            None => {
-                if is_managed_opening(line) {
-                    open_after = Some(next);
-                }
-            }
-            Some(start) => {
-                if is_managed_closing(line) {
-                    return Some((start, i));
-                }
+        if is_managed_opening(line) {
+            // Re-base on every opening marker so the closing found
+            // below pairs with the nearest one, never with an earlier
+            // unmatched opening.
+            open_after = Some(next);
+        } else if is_managed_closing(line) {
+            if let Some(start) = open_after {
+                return Some((start, i));
             }
         }
         i = next;
@@ -510,11 +525,11 @@ fn managed_section_bounds(existing: &[u8]) -> Option<(usize, usize)> {
 /// (design D1). Absent file → created containing exactly the section;
 /// existing file without markers → the section appended after a single
 /// blank-line separator, no existing byte modified; markers present →
-/// the bytes strictly between the first pair replaced, everything
-/// outside left byte-for-byte untouched; markers present and current →
-/// no write (design D2/D4/D5). Returns the one message line for the
-/// file; I/O failures propagate to the caller's exit-1 path (design
-/// D6).
+/// the bytes strictly between a closing marker and its nearest opening
+/// marker replaced, everything outside left byte-for-byte untouched;
+/// markers present and current → no write (design D2/D4/D5). Returns
+/// the one message line for the file; I/O failures propagate to the
+/// caller's exit-1 path (design D6).
 fn sync_ignore_section(path: &str) -> std::io::Result<String> {
     let existing = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -1403,6 +1418,73 @@ mod tests {
         let path = dir.path().join(".gitignore");
         std::fs::create_dir(&path).unwrap();
         assert!(sync_ignore_section(path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn sync_ignore_section_pairs_closing_with_nearest_opening() {
+        // Regression (f1): a user line that prefix-matches the opening
+        // marker but has no closing must not become the anchor for the
+        // section appended after it. Once the appended closing marker
+        // exists, the next run must pair it with the appended opening
+        // and leave the user's rules — including the stray-opening line
+        // and everything after it — byte-for-byte intact.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let user = "# user rule\n# >>> ptah (my note)\n/keep_me/\n";
+        std::fs::write(&path, user).unwrap();
+        assert_eq!(
+            sync_ignore_section(path.to_str().unwrap()).unwrap(),
+            format!("appended: {}", path.display())
+        );
+        assert_eq!(
+            sync_ignore_section(path.to_str().unwrap()).unwrap(),
+            format!("up to date: {}", path.display())
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with(user), "user rules must survive: {after:?}");
+        assert!(
+            after.contains("/keep_me/"),
+            "stray-opening rule must survive: {after:?}"
+        );
+        assert!(after.contains("/luau_packages/") && after.contains("/.pesde/"));
+    }
+
+    #[test]
+    fn sync_ignore_section_recognizes_crlf_markers() {
+        // Regression (f2): CRLF-encoded markers must be recognized so
+        // the refresh stays strictly inside them and never rewrites
+        // content after the closing marker. Recognition strips the
+        // trailing `\r`; the body is normalized to the canonical LF
+        // rules, and everything outside the markers is untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let content = format!(
+            "# user\r\n{MANAGED_IGNORE_OPENING}\r\n/keep_me/\r\n{MANAGED_IGNORE_CLOSING}\r\n# after\r\n"
+        );
+        std::fs::write(&path, &content).unwrap();
+        assert_eq!(
+            sync_ignore_section(path.to_str().unwrap()).unwrap(),
+            format!("updated: {}", path.display())
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.starts_with("# user\r\n"),
+            "before-region must survive: {after:?}"
+        );
+        assert!(
+            after.ends_with("# after\r\n"),
+            "after-region must survive: {after:?}"
+        );
+        assert!(
+            after.contains(MANAGED_IGNORE_BODY),
+            "body must be refreshed: {after:?}"
+        );
+        assert!(!after.contains("/keep_me/"), "stale body retained: {after:?}");
+        // Idempotent once the body matches, despite the CRLF markers.
+        assert_eq!(
+            sync_ignore_section(path.to_str().unwrap()).unwrap(),
+            format!("up to date: {}", path.display())
+        );
     }
 
     #[test]
