@@ -1,0 +1,29 @@
+## 1. The managed section in `ptah init`
+
+- [x] 1.1 In `crates/ptah-cli/src/cli.rs`, add the managed-section constant with the exact bytes of design D3 (opening line beginning `# >>> ptah` carrying the maintenance comment, anchored `/luau_packages/` and `/.pesde/`, closing line `# <<< ptah`) plus marker-recognition helpers (opening = a line beginning `# >>> ptah`; closing = the exact line `# <<< ptah`). Verify: a unit test asserts the constant's exact bytes, that it contains no `runs/` rule, and that near-miss markers (e.g. `# >>>ptah`) are not recognized.
+- [x] 1.2 Implement the section sync helper: absent file → create containing exactly the section (`created:`); file without markers → append the section, separating with a blank line only when the file does not already end with one and modifying no existing byte (`appended:`); markers present and content differing → replace everything strictly between the first opening marker and the first closing marker after it, leaving later pairs and all outside-marker bytes untouched (`updated:`); markers present and content matching → write nothing (`up to date:`). Verify: unit tests over tempdirs cover all five outcomes plus outside-marker byte preservation and the multi-pair degenerate input.
+- [x] 1.3 Wire the helper into `run_init` after the definitions sync so every run still prints exactly one line per file, and on any read/write/rewrite failure print `error: cannot write .ptah/.gitignore: <reason>` to stderr and exit 1 (the same per-file posture as the other three files). Verify: `cargo test -p ptah-cli --lib` passes and a manual `./target/debug/ptah init` twice in a scratch dir reports `created: .ptah/.gitignore` then `up to date: .ptah/.gitignore`.
+
+## 2. Integration tests
+
+- [x] 2.1 Rework `fresh_init_creates_exactly_three_files_with_hints` in `crates/ptah-cli/tests/init.rs`: assert all four files exist, the `.ptah/` entry list equals `[".gitignore", "config.toml", "pesde.toml", "ptah.d.luau"]`, and `.ptah/.gitignore` carries the marked section with the anchored rules and no `runs/` rule. Verify: `cargo test --test init fresh`.
+- [x] 2.2 Extend `rerunning_init_reports_skips_and_is_idempotent`: the second run reports `up to date: .ptah/.gitignore` and all four files are byte-identical. Verify: `cargo test --test init rerunning`.
+- [x] 2.3 New `unmarked_ignore_file_gains_the_section`: pre-write user rules with no ptah markers, run init, assert the section is appended, every preceding byte is unchanged, and the output line reads `appended: .ptah/.gitignore`. Verify: `cargo test --test init unmarked`.
+- [x] 2.4 New `marked_section_is_refreshed`: pre-write markers whose section content differs from the current section, run init, assert only the between-markers bytes change, everything outside is unchanged, and the output line reads `updated: .ptah/.gitignore`. Verify: `cargo test --test init marked`.
+- [x] 2.5 New `user_content_outside_markers_is_preserved`: pre-write user rules both before the opening marker and after the closing marker, run init, assert both regions are byte-for-byte unchanged and the section is current. Verify: `cargo test --test init outside_markers`.
+- [x] 2.6 New `init_writes_ignore_file_without_git`: run init in a directory with no `.git`, assert `.ptah/.gitignore` is created (write is unconditional — no git probe). Verify: `cargo test --test init without_git`.
+- [x] 2.7 Confirm the untouched cases still pin unchanged behavior (`partial_scaffold_with_configs_completes`, `written_definitions_are_byte_identical_to_types_stdout`, `stale_definitions_are_updated_with_version_arrow`, `modified_or_foreign_definitions_are_overwritten`, `source_layout_definitions_report_up_to_date`, `preexisting_config_survives_while_missing_defs_are_created`, `unwritable_target_fails_cleanly`), and extend the unwritable case so `.ptah/.gitignore` existing as a directory exits 1 with the error on stderr. Verify: `cargo test --test init`.
+
+## 3. Package guidance becomes confirmation
+
+- [x] 3.1 Rewrite `GUIDANCE` in `crates/ptah-cli/src/package.rs` to name `.ptah/.gitignore` in the commit list (`pesde.toml`, `pesde.lock`, root `.luaurc`, `.ptah/.gitignore`) and to state that the managed section already ignores the generated directories (`luau_packages/`, `.pesde/`), and extend the pinned `guidance_names_every_file_and_directory` unit test to require `.ptah/.gitignore`. Verify: `cargo test -p ptah-cli --lib`.
+- [x] 3.2 Update the guidance assertions in `crates/ptah-cli/tests/packages.rs` (`add_from_a_path_source_installs_and_syncs_the_luaurc`) to require `.ptah/.gitignore` and the confirmation wording. Verify: `cargo test --test packages`.
+
+## 4. Documentation
+
+- [x] 4.1 Update `README.md`: add a `.ptah/.gitignore` **commit** row to the package-state table, replace "ptah never edits ignore files itself" with the `.ptah/`-scoped invariant (only the managed section and the `runs/` enclave, never the repository root), and update the guidance snippet to the confirmation wording. Verify: read-through against the cli and package-management specs, and `rg -n 'never edits ignore' README.md` returns nothing.
+- [x] 4.2 Document the non-durability of removing the section honestly in `README.md` (deleting the file or the section is undone by the next `ptah init` re-run; legacy projects and hand-rolled files heal by re-running init). Verify: read-through confirms the caveat is stated without contradicting the package-state table.
+
+## 5. Gates
+
+- [x] 5.1 Run the full gates inside `nix develop`: `cargo test` (workspace), `stylua .` (no `.luau` file is edited — expect no changes), the in-place `ptah check` pass over the bundled entry scripts, `nix flake check`, and `openspec validate init-managed-gitignore`. Verify: all pass, and `crates/ptah-cli/tests/deps_guard.rs` still passes (no new I/O enters `ptah-core` — the write lives in the composition root).

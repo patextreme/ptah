@@ -10,7 +10,7 @@ Two glossary terms govern this design (`CONTEXT.md`): **enclave ignore** and **m
 
 - The generated package paths are ignored from the moment the manifest that guarantees them is scaffolded, in every project and every clone.
 - `.ptah/.gitignore` remains a file the user may own content in; ptah's writes are confined to its marked section.
-- One writer: `ptah init` is the only command that writes ignore content; package commands stay print-only.
+- One init/package writer: `ptah init` is the only init/package-surface command that writes ignore content; package commands stay print-only. The run-record writer's `.ptah/runs/` enclave file is the separate, unchanged exception (one ignore mechanism per directory).
 - The ignore rule travels with the repository (committed file), unlike a per-clone-local rule inside ignored content.
 
 **Non-Goals:**

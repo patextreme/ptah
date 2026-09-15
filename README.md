@@ -78,11 +78,12 @@ ptah --version
   [Shell completions](#shell-completions)); unknown shells are usage
   errors
 - `ptah init` — scaffold `./.ptah/` with the type definitions, a
-  commented registry skeleton, and a package-manifest skeleton (see
+  commented registry skeleton, a package-manifest skeleton, and a
+  managed ignore section (see
   [Editor setup](#editor-setup) and
   [Package management](#package-management)); the config and manifest
-  skeletons are created once and left alone, the definitions
-  are synced to the installed binary
+  skeletons are created once and left alone, while the definitions and
+  the ignore section are synced to the installed binary
 - `ptah package …` — install, update, and remove workflow packages
   (see [Package management](#package-management))
 
@@ -755,7 +756,7 @@ allow a provider or remove the dead ask.
 ## Editor setup
 
 `ptah init` is the front door: it scaffolds `./.ptah/` in the current
-directory with exactly three files —
+directory with exactly four files —
 
 - `.ptah/ptah.d.luau` — the Luau type definitions for the script API,
   byte-identical to `ptah types` output (version header included), so
@@ -764,6 +765,9 @@ directory with exactly three files —
   (see the comments there for the two-layer discovery and `${VAR}`
   interpolation rules);
 - `.ptah/pesde.toml` — a package-manifest skeleton (see
+  [Package management](#package-management));
+- `.ptah/.gitignore` — a source-control ignore file carrying a
+  ptah-managed section for the generated package paths (see
   [Package management](#package-management)).
 
 The files have different ownership. `.ptah/config.toml` and
@@ -772,8 +776,15 @@ skipped on every later run, never modified. `.ptah/ptah.d.luau` is a
 derived artifact of the
 installed binary: init syncs it — created when absent, overwritten
 whenever its bytes differ from the current binary's output, reported
-`up to date` when it already matches. So re-running `ptah init` after
-upgrading ptah is the primary way to refresh the definitions. The
+`up to date` when it already matches. `.ptah/.gitignore` is a
+user-owned file embedding the ptah-owned **managed section**: content
+outside the `# >>> ptah` … `# <<< ptah` markers is yours and never
+touched, while the section itself is derived content — created when
+the file is absent, appended when it exists without markers, and
+rewritten between the markers when they are present. So re-running
+`ptah init` after
+upgrading ptah is the primary way to refresh the definitions and the
+ignore section. The
 documented alternative — for scripting, or refreshing without touching
 config — is:
 
@@ -866,11 +877,35 @@ package-manager binary. A ptah project's package state lives inside
 | `.ptah/pesde.toml` | you (scaffolded by `ptah init`) | **commit** |
 | `.ptah/pesde.lock` | ptah (generated) | **commit** |
 | `.luaurc` | you; ptah syncs the package aliases into it | **commit** |
+| `.ptah/.gitignore` | you, with a ptah-managed section | **commit** |
 | `.ptah/luau_packages/` | ptah (generated) | ignore |
 | `.ptah/.pesde/` | ptah (generated cache) | ignore |
 
+`ptah init` writes the generated-directory rules into a marker-delimited
+**managed section** of `.ptah/.gitignore` — the `# >>> ptah` … `# <<< ptah`
+block. Content outside the markers is yours and is never touched; the
+section itself is ptah-owned derived content, refreshed on each init
+re-run. Commit the file: the rules protect a clone only if they travel
+with the repository.
+
 The first successful package command in a project prints this
-commit/ignore guidance; ptah never edits ignore files itself.
+commit/ignore guidance — confirmation now, since init already wrote the
+section: `.ptah/.gitignore` joins the commit list (`pesde.toml`,
+`pesde.lock`, the root `.luaurc`), and the managed section already
+ignores the generated `luau_packages/` and `.pesde/` directories.
+
+The ignore-file invariant: ptah never writes any ignore file outside
+`.ptah/`, and inside it touches only ignore content it can identify as
+its own — the managed section above and the `runs/` enclave file — never
+anything else in a user's ignore file and never the repository's root
+ignore file.
+
+Deletion is not durable, and that is deliberate: removing
+`.ptah/.gitignore` or the section itself is undone by the next
+`ptah init` re-run. There is no opt-out flag or manifest key. Legacy
+projects scaffolded before this change, and hand-rolled files, heal the
+same way — re-run `ptah init` and the section is appended without
+disturbing a byte of the existing rules.
 
 ```sh
 ptah init                                  # scaffolds .ptah/pesde.toml (among the rest)
@@ -935,8 +970,8 @@ ptah package add --git https://github.com/patextreme/ptah-libs --rev <tag> --as 
 ```
 
 A consumer requires the generated package shim and writes the only workflow
-code it owns — the scripts under this repository's `.ptah/workflows/` are
-exactly such shims (dogfooding is what keeps them from drifting):
+code it owns — a small entrypoint under `.ptah/workflows/<name>/main.luau`
+that wires up agent handles and calls into the playbook:
 
 ```lua
 --!strict

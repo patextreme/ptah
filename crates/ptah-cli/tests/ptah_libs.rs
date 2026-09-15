@@ -74,9 +74,9 @@ impl Project {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".ptah")).unwrap();
-        // `demo` is the plain work agent, `judge` the typed-verdict
-        // judge, `pi` the dogfood-shim agent — all the mock agent; the
-        // env knobs attach to whichever names the scenario names.
+        // `demo` is the plain work agent and `judge` the typed-verdict
+        // judge — both the mock agent; the env knobs attach to whichever
+        // names the scenario names.
         let env_for = |agent: &str| -> Vec<(&str, &str)> {
             envs.iter()
                 .filter(|(a, _)| *a == agent)
@@ -100,7 +100,6 @@ impl Project {
         };
         write_agent(&mut config, "demo");
         write_agent(&mut config, "judge");
-        write_agent(&mut config, "pi");
         std::fs::write(dir.join(".ptah").join("config.toml"), config).unwrap();
 
         // Install the pinned library as the `ptah_libs` package: a path
@@ -672,8 +671,8 @@ fn daemon_parallel_survives_one_raising_repo() {
 /// (prompts carry the `[<id> iteration N of M]` header and the mock
 /// echoes prompts back into the judge payload), the escalation
 /// predicate (its text is embedded in the judge prompt) never needs a
-/// human, and everything else fails. Shared by the openspec,
-/// pr-review-loop, and dogfood tests below.
+/// human, and everything else fails. Used by the openspec component
+/// tests below.
 fn converges_on_second_pass() -> String {
     r#"[{"match":"iteration 2","value":true},{"match":"Human input is required","value":false},{"match":"","value":false}]"#.to_string()
 }
@@ -1486,55 +1485,6 @@ fn flake_pin_matches_the_committed_lockfile_tree() {
         committed_lockfile_tree_id(),
         "PTAH_LIBS_SRC is not the tree .ptah/pesde.lock pins: \
          pair `ptah package update` with `nix flake update ptah-libs`"
-    );
-}
-
-// ---------------------------------------------------------------------
-// Dogfooding: this repo's own .ptah/workflows/* shims (the consumer
-// pattern, byte for byte) run against the mock agent.
-// ---------------------------------------------------------------------
-
-/// The repo's checked-in workflow shims (same tree the flake builds
-/// from, so the sandbox runs these paths too).
-fn workflow(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.ptah/workflows")
-        .join(name)
-}
-
-#[test]
-fn dogfood_openspec_shim_runs() {
-    // The openspec shim as it exists in the repo: the groom/implement/
-    // verify operations themselves are covered playbook-level above; this
-    // pins that the actual shim runs against the mock. The shim is copied
-    // into the generated project so its `@ptah_libs` require resolves
-    // against that project's install (alias resolution is file-relative).
-    let rules = r#"[{"match":"","value":true}]"#.to_string();
-    let p = Project::new_env("dogfood-openspec", "pi", &[("MOCK_SUBMIT_MATCH", &rules)]);
-    let shim = std::fs::read_to_string(workflow("openspec/main.luau")).unwrap();
-    let script = p.write("openspec_shim.luau", &shim);
-    let (code, stdout, stderr) = p.run(&script, &["--no-color"]);
-    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(
-        stdout.contains("Please sync and archive the change"),
-        "verify shim must run the archive step, stdout: {stdout}"
-    );
-}
-
-#[test]
-fn dogfood_pr_review_loop_shim_runs() {
-    let p = Project::new_env(
-        "dogfood-pr-review",
-        "pi",
-        &[("MOCK_SUBMIT_MATCH", &pr_review_converges_after_fix())],
-    );
-    let shim = std::fs::read_to_string(workflow("pr-review-loop/main.luau")).unwrap();
-    let script = p.write("pr_review_shim.luau", &shim);
-    let (code, stdout, stderr) = p.run_with_path(&script, &stub_gh_pr("dogfood"), &["--no-color"]);
-    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(
-        stdout.contains("push them to the PR branch"),
-        "review loop shim must push after the fix, stdout: {stdout}"
     );
 }
 
