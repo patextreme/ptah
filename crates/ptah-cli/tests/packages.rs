@@ -147,11 +147,24 @@ fn add_from_a_path_source_installs_and_syncs_the_luaurc() {
     // Stage lines and the alias defaulting to the directory name.
     assert!(stdout.contains("added"), "{stdout}");
     assert!(stdout.contains("resolved 1 package(s)"), "{stdout}");
-    // First mutating command prints the commit/ignore guidance.
+    // First mutating command prints the commit/ignore guidance —
+    // confirmation, post-init: every commit row is named, and the
+    // managed section's coverage of the generated dirs is stated.
     assert!(stdout.contains("Source control:"), "{stdout}");
-    for name in ["pesde.toml", "pesde.lock", ".luaurc", "luau_packages/", ".pesde/"] {
+    for name in [
+        "pesde.toml",
+        "pesde.lock",
+        ".luaurc",
+        ".ptah/.gitignore",
+        "luau_packages/",
+        ".pesde/",
+    ] {
         assert!(stdout.contains(name), "guidance names {name}: {stdout}");
     }
+    assert!(
+        stdout.contains("managed section") && stdout.contains("already ignores"),
+        "guidance must confirm the section covers the generated dirs: {stdout}"
+    );
     // The root .luaurc was created with the alias.
     let luaurc =
         std::fs::read_to_string(p.dir.join(".luaurc")).expect("root .luaurc created");
@@ -168,6 +181,13 @@ fn add_from_a_path_source_installs_and_syncs_the_luaurc() {
         "packages installed"
     );
     assert!(p.dir.join(".ptah/pesde.lock").is_file());
+    // Package commands never write ignore files: this project never ran
+    // `ptah init`, so no managed section exists — and `add` must not
+    // create one.
+    assert!(
+        !p.dir.join(".ptah/.gitignore").exists(),
+        "package commands must not write ignore files"
+    );
 }
 
 #[test]

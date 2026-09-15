@@ -13,9 +13,16 @@ use ptah_pesde::{luaurc, manifest, Error, PackageProject};
 
 /// The commit/ignore guidance printed by the first successful
 /// mutating package command in a project (one that writes the first
-/// lockfile). ptah prints hints, never edits VCS config.
-const GUIDANCE: &str = "Source control: commit .ptah/pesde.toml, .ptah/pesde.lock, and the \
-     root .luaurc; ignore .ptah/luau_packages/ and .ptah/.pesde/.";
+/// lockfile). Post-`ptah init`, this is confirmation rather than
+/// instruction: the commit list names every file that must travel
+/// with the repo, and the ignore half states that the managed section
+/// `ptah init` wrote into `.ptah/.gitignore` already covers the
+/// generated directories. ptah prints hints from package commands,
+/// never edits VCS config; the only ignore writes live in `ptah init`
+/// and the run-record enclave.
+const GUIDANCE: &str = "Source control: commit .ptah/pesde.toml, .ptah/pesde.lock, the root \
+     .luaurc, and .ptah/.gitignore; the managed section in .ptah/.gitignore already \
+     ignores the generated .ptah/luau_packages/ and .ptah/.pesde/ directories.";
 
 /// The parsed `ptah package add` arguments (validated shapes only —
 /// the source-form mutual exclusions are clap's).
@@ -203,13 +210,18 @@ mod tests {
     #[test]
     fn guidance_names_every_file_and_directory() {
         for name in [
-            "pesde.toml",
-            "pesde.lock",
+            ".ptah/pesde.toml",
+            ".ptah/pesde.lock",
             ".luaurc",
+            ".ptah/.gitignore",
             "luau_packages/",
             ".pesde/",
         ] {
             assert!(GUIDANCE.contains(name), "guidance must name {name}: {GUIDANCE}");
         }
+        assert!(
+            GUIDANCE.contains("managed section") && GUIDANCE.contains("already ignores"),
+            "guidance must confirm the section covers the generated dirs: {GUIDANCE}"
+        );
     }
 }

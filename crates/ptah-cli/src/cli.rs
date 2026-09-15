@@ -429,13 +429,154 @@ fn sync_definitions(path: &str) -> std::io::Result<String> {
     })
 }
 
+/// The opening-marker prefix (design D3): a managed section opens on a
+/// line beginning `# >>> ptah`. Prefix recognition lets the maintenance
+/// comment evolve without breaking detection, while near misses such as
+/// `# >>>ptah` read as ordinary content.
+const MANAGED_IGNORE_OPENING_PREFIX: &str = "# >>> ptah";
+
+/// The managed section `ptah init` writes into `.ptah/.gitignore`
+/// (design D3) — the exact bytes: the opening line carrying the
+/// maintenance comment, the anchored rules for the two generated
+/// package paths, and the exact closing line. A file created by init
+/// contains this section and nothing else.
+const MANAGED_IGNORE_SECTION: &str = "\
+# >>> ptah (managed section; `ptah init` refreshes it)
+/luau_packages/
+/.pesde/
+# <<< ptah
+";
+
+/// The opening line as written — pinned against `MANAGED_IGNORE_SECTION`
+/// by test so the constant cannot drift from its parts. Test-only: the
+/// section constant above carries the bytes in production.
+#[cfg(test)]
+const MANAGED_IGNORE_OPENING: &str = "# >>> ptah (managed section; `ptah init` refreshes it)";
+
+/// The closing line — recognition is exact match (design D3).
+const MANAGED_IGNORE_CLOSING: &str = "# <<< ptah";
+
+/// The ptah-owned content strictly between the markers: the derived
+/// ignore rules the refresh rewrites. Anchored patterns (leading `/`)
+/// name exactly the two paths in `.ptah/`; an unanchored `.pesde/`
+/// would also match the linker's nested `luau_packages/.pesde/`.
+const MANAGED_IGNORE_BODY: &str = "/luau_packages/\n/.pesde/\n";
+
+/// Strip one trailing carriage return so a CRLF line recognizes the
+/// same markers as an LF line. CRLF is a line-ending encoding, not
+/// content: without this, the opening marker (a prefix match) would
+/// still register while the CRLF closing marker would not, leaving a
+/// half-open pair whose later refresh spans user content (f2). Only
+/// recognition is normalized; the bytes written outside the markers
+/// are always left as found.
+fn trim_carriage_return(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+/// Opening-marker recognition: a line whose bytes begin with
+/// `# >>> ptah` (a trailing `\r` from a CRLF file is ignored).
+fn is_managed_opening(line: &[u8]) -> bool {
+    trim_carriage_return(line).starts_with(MANAGED_IGNORE_OPENING_PREFIX.as_bytes())
+}
+
+/// Closing-marker recognition: the exact line `# <<< ptah` (a trailing
+/// `\r` from a CRLF file is ignored).
+fn is_managed_closing(line: &[u8]) -> bool {
+    trim_carriage_return(line) == MANAGED_IGNORE_CLOSING.as_bytes()
+}
+
+/// Locate the first managed section in `existing`: the byte offsets
+/// strictly between the first closing marker and the nearest opening
+/// marker preceding it, returned as `(body_start, body_end)`. `None`
+/// when no closing marker has an opening marker before it, which reads
+/// as unmarked — the section is appended. Pairing each closing with its
+/// *nearest* preceding opening (rather than the first opening in the
+/// file) keeps a stray, unmatched opening line — a user note that
+/// happens to begin `# >>> ptah` — from widening the rewrite span
+/// across user content once an appended section's closing marker
+/// appears on a later run (f1). Later pairs after the first closing are
+/// left alone (design D5).
+fn managed_section_bounds(existing: &[u8]) -> Option<(usize, usize)> {
+    let mut open_after: Option<usize> = None;
+    let mut i = 0usize;
+    while i < existing.len() {
+        let rest = &existing[i..];
+        let (line, next) = match rest.iter().position(|&b| b == b'\n') {
+            Some(p) => (&rest[..p], i + p + 1),
+            None => (rest, existing.len()),
+        };
+        if is_managed_opening(line) {
+            // Re-base on every opening marker so the closing found
+            // below pairs with the nearest one, never with an earlier
+            // unmatched opening.
+            open_after = Some(next);
+        } else if is_managed_closing(line) {
+            if let Some(start) = open_after {
+                return Some((start, i));
+            }
+        }
+        i = next;
+    }
+    None
+}
+
+/// Sync the managed ignore section in `.ptah/.gitignore` (the fourth
+/// `ptah init` file): a user-owned file embedding a ptah-owned section
+/// (design D1). Absent file → created containing exactly the section;
+/// existing file without markers → the section appended after a single
+/// blank-line separator, no existing byte modified; markers present →
+/// the bytes strictly between a closing marker and its nearest opening
+/// marker replaced, everything outside left byte-for-byte untouched;
+/// markers present and current → no write (design D2/D4/D5). Returns
+/// the one message line for the file; I/O failures propagate to the
+/// caller's exit-1 path (design D6).
+fn sync_ignore_section(path: &str) -> std::io::Result<String> {
+    let existing = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(path, MANAGED_IGNORE_SECTION)?;
+            return Ok(format!("created: {path}"));
+        }
+        Err(e) => return Err(e),
+    };
+    match managed_section_bounds(&existing) {
+        Some((body_start, body_end)) => {
+            if &existing[body_start..body_end] == MANAGED_IGNORE_BODY.as_bytes() {
+                return Ok(format!("up to date: {path}"));
+            }
+            let mut next = Vec::with_capacity(existing.len() + MANAGED_IGNORE_BODY.len());
+            next.extend_from_slice(&existing[..body_start]);
+            next.extend_from_slice(MANAGED_IGNORE_BODY.as_bytes());
+            next.extend_from_slice(&existing[body_end..]);
+            std::fs::write(path, &next)?;
+            Ok(format!("updated: {path}"))
+        }
+        None => {
+            let mut next = existing;
+            if !next.is_empty() && !next.ends_with(b"\n\n") {
+                if next.ends_with(b"\n") {
+                    next.push(b'\n');
+                } else {
+                    next.extend_from_slice(b"\n\n");
+                }
+            }
+            next.extend_from_slice(MANAGED_IGNORE_SECTION.as_bytes());
+            std::fs::write(path, &next)?;
+            Ok(format!("appended: {path}"))
+        }
+    }
+}
+
 /// `ptah init`: scaffold `./.ptah/` in the current working directory
-/// with exactly three files — `ptah.d.luau` (byte-identical to
+/// with exactly four files — `ptah.d.luau` (byte-identical to
 /// `ptah types` stdout), `config.toml` (commented registry skeleton),
-/// and `pesde.toml` (package-manifest skeleton). The configs are
+/// `pesde.toml` (package-manifest skeleton), and `.gitignore` (a
+/// user-owned file carrying a managed ptah section). The configs are
 /// user-authored — created when absent, skipped with a message
 /// otherwise, never modified — while the definitions are a derived
 /// artifact this binary syncs via `sync_definitions` (created /
+/// updated / confirmed current) and the ignore section is derived
+/// content synced via `sync_ignore_section` (created / appended /
 /// updated / confirmed current), so re-running after an upgrade is
 /// the refresh path and a partial scaffold still completes. Hints
 /// print on every run. Requires no script, registry, or agent
@@ -481,6 +622,17 @@ fn run_init() -> ExitCode {
         Ok(line) => println!("{line}"),
         Err(e) => {
             eprintln!("error: cannot write .ptah/ptah.d.luau: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    // The ignore file: a user-owned file whose ptah-owned section is
+    // derived content, synced with the same create/updated/current
+    // posture as the definitions (plus the append outcome for a file
+    // that predates the markers).
+    match sync_ignore_section(".ptah/.gitignore") {
+        Ok(line) => println!("{line}"),
+        Err(e) => {
+            eprintln!("error: cannot write .ptah/.gitignore: {e}");
             return ExitCode::from(1);
         }
     }
@@ -1111,6 +1263,227 @@ mod tests {
             std::fs::read(&path).unwrap(),
             definitions_bytes().as_bytes(),
             "differing file must be overwritten with the current emit"
+        );
+    }
+
+    #[test]
+    fn managed_ignore_section_is_exact_bytes_without_runs() {
+        // The constant must be exactly the three parts joined, carry the
+        // anchored rules, and never cover `runs/` (which keeps its own
+        // enclave).
+        assert_eq!(
+            MANAGED_IGNORE_SECTION,
+            format!("{MANAGED_IGNORE_OPENING}\n{MANAGED_IGNORE_BODY}{MANAGED_IGNORE_CLOSING}\n")
+        );
+        assert!(MANAGED_IGNORE_SECTION.contains("/luau_packages/\n"));
+        assert!(MANAGED_IGNORE_SECTION.contains("/.pesde/\n"));
+        assert!(MANAGED_IGNORE_SECTION.ends_with("# <<< ptah\n"));
+        assert!(
+            !MANAGED_IGNORE_SECTION.contains("runs"),
+            "the section must not carry a runs/ rule: {MANAGED_IGNORE_SECTION:?}"
+        );
+    }
+
+    #[test]
+    fn managed_marker_recognition_rejects_near_misses() {
+        assert!(is_managed_opening(MANAGED_IGNORE_OPENING.as_bytes()));
+        assert!(is_managed_opening(b"# >>> ptah"));
+        assert!(is_managed_closing(b"# <<< ptah"));
+        for line in [
+            &b"# >>>ptah"[..],   // no separating space
+            b"# >>>  ptah",      // two spaces
+            b"# >> ptah",        // wrong marker
+            b"#>>> ptah",        // missing space after #
+            b"# <<<  ptah",      // closing near miss
+            b"# <<< ptah ",      // trailing space
+            b" # <<< ptah",      // leading space
+            b"# <<<ptah",        // no separating space
+            b"/luau_packages/", // ordinary content
+        ] {
+            assert!(
+                !is_managed_opening(line) && !is_managed_closing(line),
+                "must not recognize {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_ignore_section_creates_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let line = sync_ignore_section(path.to_str().unwrap()).unwrap();
+        assert_eq!(line, format!("created: {}", path.display()));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            MANAGED_IGNORE_SECTION.as_bytes(),
+            "created file must contain exactly the section"
+        );
+    }
+
+    #[test]
+    fn sync_ignore_section_append_separator_normalizes_to_one_blank_line() {
+        // The separator is a blank line only when the file does not
+        // already end with one; existing bytes are never modified.
+        for user in [&b"*.log"[..], b"*.log\n", b"*.log\n\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(".gitignore");
+            std::fs::write(&path, user).unwrap();
+            let line = sync_ignore_section(path.to_str().unwrap()).unwrap();
+            assert_eq!(line, format!("appended: {}", path.display()));
+            let after = std::fs::read(&path).unwrap();
+            assert!(after.starts_with(user), "existing bytes must be a prefix");
+            let sep: &[u8] = if user.ends_with(b"\n\n") {
+                b""
+            } else if user.ends_with(b"\n") {
+                b"\n"
+            } else {
+                b"\n\n"
+            };
+            assert_eq!(
+                &after[user.len()..],
+                [sep, MANAGED_IGNORE_SECTION.as_bytes()].concat(),
+                "for existing {user:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_ignore_section_refreshes_between_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let stale = format!(
+            "user before\n{MANAGED_IGNORE_OPENING}\n/old_stale_rule/\n{MANAGED_IGNORE_CLOSING}\nuser after\n"
+        );
+        std::fs::write(&path, &stale).unwrap();
+        let line = sync_ignore_section(path.to_str().unwrap()).unwrap();
+        assert_eq!(line, format!("updated: {}", path.display()));
+        let expected = format!(
+            "user before\n{MANAGED_IGNORE_OPENING}\n{MANAGED_IGNORE_BODY}{MANAGED_IGNORE_CLOSING}\nuser after\n"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn sync_ignore_section_reports_up_to_date_without_writing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let content = format!("before\n{MANAGED_IGNORE_SECTION}after\n");
+        std::fs::write(&path, &content).unwrap();
+        // A read-only file proves no write happens on the current path.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let line = sync_ignore_section(path.to_str().unwrap()).unwrap();
+        assert_eq!(line, format!("up to date: {}", path.display()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn sync_ignore_section_preserves_bytes_outside_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let before = "# user rule before\n*.bak\n";
+        let after = "\n# user rule after\nbuild/\n";
+        let content = format!(
+            "{before}{MANAGED_IGNORE_OPENING}\nstale body\n{MANAGED_IGNORE_CLOSING}{after}"
+        );
+        std::fs::write(&path, &content).unwrap();
+        let line = sync_ignore_section(path.to_str().unwrap()).unwrap();
+        assert_eq!(line, format!("updated: {}", path.display()));
+        let refreshed = std::fs::read_to_string(&path).unwrap();
+        assert!(refreshed.starts_with(before), "before-region must survive");
+        assert!(refreshed.ends_with(after), "after-region must survive");
+    }
+
+    #[test]
+    fn sync_ignore_section_refreshes_only_the_first_marker_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let second = format!("{MANAGED_IGNORE_OPENING}\n/keep_me/\n{MANAGED_IGNORE_CLOSING}\n");
+        let content = format!(
+            "{MANAGED_IGNORE_OPENING}\n/stale/\n{MANAGED_IGNORE_CLOSING}\nmiddle\n{second}"
+        );
+        std::fs::write(&path, &content).unwrap();
+        let line = sync_ignore_section(path.to_str().unwrap()).unwrap();
+        assert_eq!(line, format!("updated: {}", path.display()));
+        let expected = format!(
+            "{MANAGED_IGNORE_OPENING}\n{MANAGED_IGNORE_BODY}{MANAGED_IGNORE_CLOSING}\nmiddle\n{second}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn sync_ignore_section_errors_when_path_is_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        std::fs::create_dir(&path).unwrap();
+        assert!(sync_ignore_section(path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn sync_ignore_section_pairs_closing_with_nearest_opening() {
+        // Regression (f1): a user line that prefix-matches the opening
+        // marker but has no closing must not become the anchor for the
+        // section appended after it. Once the appended closing marker
+        // exists, the next run must pair it with the appended opening
+        // and leave the user's rules — including the stray-opening line
+        // and everything after it — byte-for-byte intact.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let user = "# user rule\n# >>> ptah (my note)\n/keep_me/\n";
+        std::fs::write(&path, user).unwrap();
+        assert_eq!(
+            sync_ignore_section(path.to_str().unwrap()).unwrap(),
+            format!("appended: {}", path.display())
+        );
+        assert_eq!(
+            sync_ignore_section(path.to_str().unwrap()).unwrap(),
+            format!("up to date: {}", path.display())
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with(user), "user rules must survive: {after:?}");
+        assert!(
+            after.contains("/keep_me/"),
+            "stray-opening rule must survive: {after:?}"
+        );
+        assert!(after.contains("/luau_packages/") && after.contains("/.pesde/"));
+    }
+
+    #[test]
+    fn sync_ignore_section_recognizes_crlf_markers() {
+        // Regression (f2): CRLF-encoded markers must be recognized so
+        // the refresh stays strictly inside them and never rewrites
+        // content after the closing marker. Recognition strips the
+        // trailing `\r`; the body is normalized to the canonical LF
+        // rules, and everything outside the markers is untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gitignore");
+        let content = format!(
+            "# user\r\n{MANAGED_IGNORE_OPENING}\r\n/keep_me/\r\n{MANAGED_IGNORE_CLOSING}\r\n# after\r\n"
+        );
+        std::fs::write(&path, &content).unwrap();
+        assert_eq!(
+            sync_ignore_section(path.to_str().unwrap()).unwrap(),
+            format!("updated: {}", path.display())
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.starts_with("# user\r\n"),
+            "before-region must survive: {after:?}"
+        );
+        assert!(
+            after.ends_with("# after\r\n"),
+            "after-region must survive: {after:?}"
+        );
+        assert!(
+            after.contains(MANAGED_IGNORE_BODY),
+            "body must be refreshed: {after:?}"
+        );
+        assert!(!after.contains("/keep_me/"), "stale body retained: {after:?}");
+        // Idempotent once the body matches, despite the CRLF markers.
+        assert_eq!(
+            sync_ignore_section(path.to_str().unwrap()).unwrap(),
+            format!("up to date: {}", path.display())
         );
     }
 

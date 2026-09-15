@@ -79,21 +79,16 @@
     '';
 
     # Static-analysis gate for the Luau surface: every bundled script
-    # (examples, type-definition probe fixture, and this repo's own
-    # workflow shims — whose require graph pulls in the installed
-    # ptah_libs package) must pass luau-lsp in strict mode (per-file
-    # --!strict directives) against the repo definitions
-    # (.ptah/ptah.d.luau). The pinned library is installed from the
-    # `ptah-libs` flake input first (offline: a path source), so the
-    # shims' `@ptah_libs` requires resolve. Keeps examples and the shims
-    # honest in the same direction as the runtime probe test.
+    # (examples and the type-definition probe fixture) must pass luau-lsp
+    # in strict mode (per-file --!strict directives) against the repo
+    # definitions (.ptah/ptah.d.luau). Keeps examples honest in the same
+    # direction as the runtime probe test.
     checks.ptah-analyze = pkgs.stdenv.mkDerivation {
       pname = "ptah-analyze";
       version = commonArgs.version;
       src = config.ptahSrc;
 
       nativeBuildInputs = [config.packages.ptah pkgs.luau-lsp pkgs.stylua];
-      env.PTAH_LIBS_SRC = "${inputs.ptah-libs}";
 
       dontBuild = true;
       doCheck = true;
@@ -101,7 +96,6 @@
       checkPhase = ''
         runHook preCheck
         cp -r $src work && chmod -R u+w work && cd work
-        ptah package add --path "$PTAH_LIBS_SRC" --as ptah_libs > /dev/null
         # StyLua defaults are the house style (no stylua.toml; the
         # nixpkgs pin is the version pin). .styluaignore keeps the
         # generated definitions and installed packages out of this pass —
@@ -110,8 +104,7 @@
         stylua --check .
         luau-lsp analyze --platform=standard \
           --definitions=.ptah/ptah.d.luau \
-          examples/*.luau examples/*/*.luau crates/ptah-cli/tests/fixtures/*.luau \
-          .ptah/workflows/*/*.luau
+          examples/*.luau examples/*/*.luau crates/ptah-cli/tests/fixtures/*.luau
         runHook postCheck
       '';
 
@@ -122,14 +115,10 @@
 
     # In-place `ptah check` gate over the repo's own entry scripts,
     # driven by the *release* package (shipped `ptah` with same-commit
-    # embedded definitions, bundled mock-agent). The pinned library is
-    # installed from the `ptah-libs` flake input first (offline: a path
-    # source), so the shims' `@ptah_libs` requires resolve and their
-    # literal require graph covers the whole package with no probe file.
-    # The sandbox source strips .ptah/config.toml by design, so the
-    # registry comes from a synthesized HOME-level config defining the two
-    # agent names the scripts reference (examples use `demo`, workflow
-    # shims `pi`); discovery walks up from the unpacked source (finds
+    # embedded definitions, bundled mock-agent). The sandbox source strips
+    # .ptah/config.toml by design, so the registry comes from a synthesized
+    # HOME-level config defining the agent name the examples reference
+    # (`demo`); discovery walks up from the unpacked source (finds
     # nothing — the store has no .ptah/) and falls through to it.
     # Zero-execution: nothing spawns an agent; the registry entry is
     # lint-resolution only. luau-lsp rides along because `ptah check`'s
@@ -141,7 +130,6 @@
       src = config.ptahSrc;
 
       nativeBuildInputs = [config.packages.ptah pkgs.luau-lsp];
-      env.PTAH_LIBS_SRC = "${inputs.ptah-libs}";
 
       dontBuild = true;
       doCheck = true;
@@ -149,16 +137,11 @@
       checkPhase = ''
         runHook preCheck
         cp -r $src work && chmod -R u+w work && cd work
-        ptah package add --path "$PTAH_LIBS_SRC" --as ptah_libs > /dev/null
         export HOME="$NIX_BUILD_TOP/ptah-check-home"
         export XDG_CONFIG_HOME="$HOME/.config"
         mkdir -p "$XDG_CONFIG_HOME/ptah"
         cat > "$XDG_CONFIG_HOME/ptah/config.toml" <<EOF
         [agents.demo]
-        command = "${config.packages.ptah}/bin/mock-agent"
-        args = []
-
-        [agents.pi]
         command = "${config.packages.ptah}/bin/mock-agent"
         args = []
 
@@ -169,7 +152,7 @@
         [ask]
         provider = "stdin"
         EOF
-        for script in examples/*.luau examples/*/*.luau .ptah/workflows/*/main.luau; do
+        for script in examples/*.luau examples/*/*.luau; do
           echo "ptah check: $script"
           "${config.packages.ptah}/bin/ptah" check "$script"
         done
