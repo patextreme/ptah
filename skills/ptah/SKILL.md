@@ -119,7 +119,7 @@ file.
 
 | API | Description |
 | --- | --- |
-| `ptah.agent(name_or_spec)` | Agent factory. `name` resolves against the registry (raises `unknown agent \`name\`…` at this call when missing); inline spec `{ command =, args = {…}, env = {…} }` skips the registry. `${VAR}` in inline `env` values interpolates from ptah's environment. |
+| `ptah.agent(name_or_spec)` | Agent factory. `name` resolves against the registry (raises `unknown agent \`name\`…` at this call when missing); inline spec `{ command =, args = {…}, env = {…}, cwd = "…" }` skips the registry. `${VAR}` in inline `env` values interpolates from ptah's environment. |
 | `agent:session(opts?)` | New session (own subprocess). Returns an `Agent`-scoped handle; `opts` below. |
 | `session:prompt(text, { timeoutMs = n }?)` | One turn → `PromptResult` (below). **Timeout raises a catchable Lua error** after sending a cancel — `pcall` it if you need to survive. |
 | `session:cancel()` | Cancel the in-flight turn; the blocked `prompt` returns normally with `stopReason = "cancelled"`. |
@@ -141,8 +141,13 @@ Session options (`agent:session({...})`; all optional):
 - `id` — session label; defaults to `s1, s2, …` per agent. `"exec"` is
   reserved (exec lifecycle attribution) and rejected at session
   creation.
-- `cwd` — working dir for the agent subprocess; defaults to the
-  invocation directory.
+- `cwd` — working dir for the agent's sessions; resolved by precedence:
+  the session option wins, then the agent's `cwd` (inline spec or registry
+  entry, after `${VAR}` interpolation), then ptah's invocation directory.
+  A relative `cwd` — from the option or the agent spec — resolves against
+  the invocation directory. A resolved path that is missing, is not a
+  directory, or is empty raises a catchable error at `session()` before
+  any subprocess spawns.
 - `mcpServers` — suggested MCP servers: `{ type = "stdio", name =,
   command =, args =, env = }` or `{ type = "http", name =, url =,
   headers = }`.
@@ -511,12 +516,17 @@ directory) overrides `~/.config/ptah/config.toml` **per agent name**:
 command = "npx"
 args = ["-y", "@agentclientprotocol/claude-agent-acp@latest"]
 env = { ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}" }
+cwd = "worktrees/42"
 ```
 
 `${VAR}` interpolates from ptah's environment at resolve time (unset →
-empty); `env` merges over the inherited environment. Process-level env
-cannot vary per session — per-session model fan-out is exactly what
-`setConfig` is for.
+empty), for `cwd` as well; `env` merges over the inherited environment.
+Process-level env cannot vary per session — per-session model fan-out is
+exactly what `setConfig` is for.
+
+An entry's (or inline spec's) `cwd` is the session working directory — a
+relative value resolves against the invocation directory, and an explicit
+session `cwd` overrides it (see Session options above).
 
 The registry's one global (non-agent) section is `[ask]`, selecting the
 `ptah.ask` provider:

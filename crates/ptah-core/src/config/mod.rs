@@ -30,6 +30,10 @@ pub struct AgentSpec {
     /// Environment overrides merged over the inherited environment.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Working directory for the agent's sessions, overriding the
+    /// invocation-directory default unless a session overrides it.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 impl AgentSpec {
@@ -39,10 +43,12 @@ impl AgentSpec {
             command: command.into(),
             args: Vec::new(),
             env: BTreeMap::new(),
+            cwd: None,
         }
     }
 
-    /// Interpolate `${VAR}` (unset → empty) across command, args, and env values.
+    /// Interpolate `${VAR}` (unset → empty) across command, args, env
+    /// values, and `cwd`.
     pub fn interpolate(&self, lookup: &dyn Fn(&str) -> Option<String>) -> AgentSpec {
         AgentSpec {
             command: interpolate(&self.command, lookup),
@@ -52,6 +58,7 @@ impl AgentSpec {
                 .iter()
                 .map(|(k, v)| (k.clone(), interpolate(v, lookup)))
                 .collect(),
+            cwd: self.cwd.as_deref().map(|c| interpolate(c, lookup)),
         }
     }
 }
@@ -249,6 +256,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            cwd: None,
         }
     }
 
@@ -374,6 +382,43 @@ mod tests {
         assert_eq!(out.args[0], "--key=");
         assert_eq!(out.args[1], "amidb");
         assert_eq!(out.env["M"], "opus");
+    }
+
+    // ------------------------------------------------------------------
+    // cwd (agent-level-cwd change)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn toml_entry_with_cwd_parses() {
+        let spec: AgentSpec = toml::from_str("command = \"npx\"\ncwd = \"/home/u/repo-wt\"\n")
+            .expect("entry with cwd parses");
+        assert_eq!(spec.cwd.as_deref(), Some("/home/u/repo-wt"));
+    }
+
+    #[test]
+    fn toml_entry_without_cwd_deserializes_to_none() {
+        let spec: AgentSpec =
+            toml::from_str("command = \"npx\"\n").expect("entry without cwd parses");
+        assert_eq!(spec.cwd, None);
+    }
+
+    #[test]
+    fn interpolate_cwd_set_and_unset() {
+        let with_var = AgentSpec {
+            cwd: Some("${WORKTREE}".into()),
+            ..spec("npx", &[], &[])
+        };
+        let set = with_var.interpolate(&|var| match var {
+            "WORKTREE" => Some("/home/u/repo-wt".into()),
+            _ => None,
+        });
+        assert_eq!(set.cwd.as_deref(), Some("/home/u/repo-wt"));
+
+        // Unset `${VAR}` expands to the empty string, same contract as
+        // every other field; `None` cwd stays `None` (never `Some("")`).
+        let unset = with_var.interpolate(&|_| None);
+        assert_eq!(unset.cwd.as_deref(), Some(""));
+        assert_eq!(spec("npx", &[], &[]).interpolate(&|_| None).cwd, None);
     }
 
     // ------------------------------------------------------------------

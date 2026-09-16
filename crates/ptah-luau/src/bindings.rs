@@ -292,7 +292,26 @@ fn new_agent_factory(
                 let label = format!("{name}/{id}");
 
                 let cwd: Option<String> = opts.get("cwd")?;
-                let cwd = match cwd {
+                // Working-directory precedence: an explicit session
+                // option wins, then the handle's resolved `cwd` (inline
+                // spec or registry entry, after `${VAR}` interpolation),
+                // then ptah's invocation directory. A relative value
+                // from either source resolves against the invocation
+                // directory.
+                let chosen = cwd.or_else(|| spec.cwd.clone());
+                // An empty resolved cwd is unusable: an unset `${VAR}`
+                // expands to the empty string (the same contract as every
+                // other field). Reject it explicitly — a relative `""`
+                // would otherwise join to the invocation directory and
+                // silently pass the directory check below, hiding a
+                // misconfigured path.
+                if chosen.as_deref() == Some("") {
+                    return Err(mlua::Error::runtime(
+                        "session cwd is empty — an unset `${VAR}` in `cwd` expands to the \
+                         empty string; set `cwd` to a real directory or omit it",
+                    ));
+                }
+                let cwd = match chosen {
                     Some(dir) => {
                         let p = Path::new(&dir);
                         if p.is_absolute() {
@@ -303,6 +322,20 @@ fn new_agent_factory(
                     }
                     None => state.invocation_dir.clone(),
                 };
+                // Fail fast, before any subprocess spawns: a resolved
+                // working directory that does not exist or is not a
+                // directory is a scripting error the author can act on,
+                // and the agent would only fail obscurely downstream.
+                // Uniform across every cwd source (a deliberate
+                // behavior change for an explicitly wrong per-session
+                // `cwd`). This is a courtesy probe, not a guarantee —
+                // the directory may vanish after this check.
+                if !cwd.is_dir() {
+                    return Err(mlua::Error::runtime(format!(
+                        "session cwd `{}` does not exist or is not a directory",
+                        cwd.display()
+                    )));
+                }
 
                 let mut mcp_servers = Vec::new();
                 let raw: Option<Value> = opts.get("mcpServers")?;
@@ -433,10 +466,12 @@ pub(super) fn bind_ptah(lua: &Lua) -> mlua::Result<()> {
             Value::Table(t) => {
                 let args: Option<Vec<String>> = t.get("args")?;
                 let env: Option<std::collections::BTreeMap<String, String>> = t.get("env")?;
+                let cwd: Option<String> = t.get("cwd")?;
                 let authored = AgentSpec {
                     command: t.get("command")?,
                     args: args.unwrap_or_default(),
                     env: env.unwrap_or_default(),
+                    cwd,
                 };
                 let resolved = authored.interpolate(&interp_lookup);
                 // An inline spec has no registry name: the authored
@@ -908,15 +943,19 @@ mod tests {
 
     /// Loopback transport: returns handles carrying canned agent-side
     /// ids (`acp-session-{n}`, one per start) and serves the command
-    /// channel just enough for close/join to complete.
+    /// channel just enough for close/join to complete. Records the
+    /// `(spec cwd, session opts cwd)` of every start for
+    /// cwd-resolution assertions.
     struct LoopbackTransport {
         next: AtomicU64,
+        starts: Mutex<Vec<(Option<String>, std::path::PathBuf)>>,
     }
 
     impl Default for LoopbackTransport {
         fn default() -> Self {
             Self {
                 next: AtomicU64::new(0),
+                starts: Mutex::new(Vec::new()),
             }
         }
     }
@@ -924,12 +963,16 @@ mod tests {
     impl AgentTransport for LoopbackTransport {
         fn start_session<'a>(
             &'a self,
-            _spec: &'a ptah_core::config::AgentSpec,
+            spec: &'a ptah_core::config::AgentSpec,
             opts: SessionOptions,
             _sink: Arc<dyn EventSink>,
         ) -> Pin<Box<dyn Future<Output = Result<SessionHandle, ptah_core::session::SessionError>> + 'a>>
         {
             let n = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+            self.starts
+                .lock()
+                .unwrap()
+                .push((spec.cwd.clone(), opts.cwd.clone()));
             Box::pin(async move {
                 let (cmd_tx, mut cmd_rx) =
                     tokio::sync::mpsc::unbounded_channel::<SessionCmd>();
@@ -1009,6 +1052,7 @@ local inline = ptah.agent({
                             "TOKEN".to_string(),
                             "${PTAH_TEST_UNRESOLVED}".to_string(),
                         )]),
+                        cwd: None,
                     },
                 )]),
                 ask: None,
@@ -1123,5 +1167,279 @@ ptah.log("two=" .. two:sessionId())
         // The id is neither the label nor its local-id suffix — and the
         // first id is non-empty by the exact-match asserts above.
         assert!(logs.contains(&"one-label=loopback/one".to_string()), "logs: {logs:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // agent-level cwd (agent-level-cwd change)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn inline_spec_cwd_reaches_resolved_spec_without_record_field() {
+        // Task 2.1: the inline table's `cwd` lands in the resolved spec
+        // the transport receives. The readiness event's authored shape
+        // is deliberately unchanged — no cwd field joins the record.
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        let script = dir.path().join("main.luau");
+        std::fs::write(
+            &script,
+            format!(
+                r#"local inline = ptah.agent({{
+    command = "loopback-inline",
+    args = {{ "--x" }},
+    cwd = "{}",
+}}):session({{ id = "i" }})
+"#,
+                wt.display()
+            ),
+        )
+        .unwrap();
+
+        let sink = Arc::new(EventRecordingSink::default());
+        let transport = Arc::new(LoopbackTransport::default());
+        let cfg = RunConfig {
+            script_path: script,
+            invocation_dir: dir.path().to_path_buf(),
+            registry: Registry::default(),
+            transport: transport.clone(),
+            process_runner: None,
+            interaction: InteractionMode::Unresolved,
+            shutdown: None,
+            renderer: sink.clone(),
+            env: Default::default(),
+        };
+        let outcome = tokio::task::LocalSet::new().run_until(run(cfg)).await;
+        assert_eq!(outcome.code, 0, "error: {:?}", outcome.error);
+
+        let starts = transport.starts.lock().unwrap().clone();
+        assert_eq!(starts.len(), 1);
+        // The resolved spec carries the authored cwd...
+        assert_eq!(starts[0].0.as_deref(), Some(wt.to_str().unwrap()));
+        // ...and it is the session's working directory.
+        assert_eq!(starts[0].1, wt);
+
+        // The readiness event keeps the pre-existing authored shape:
+        // label, agent, command, args, env key names, ACP id. There is
+        // no cwd field to carry (by design — no record-format growth).
+        let events = sink.0.lock().unwrap().clone();
+        let ready: Vec<&SessionEvent> = events
+            .iter()
+            .map(|(_, event)| event)
+            .filter(|event| matches!(event, SessionEvent::SessionReady { .. }))
+            .collect();
+        assert_eq!(ready.len(), 1, "events: {events:?}");
+        let SessionEvent::SessionReady {
+            label,
+            agent,
+            command,
+            args,
+            env_keys,
+            acp_id,
+        } = ready[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(label, "loopback-inline/i");
+        assert_eq!(agent, "loopback-inline");
+        assert_eq!(command, "loopback-inline");
+        assert_eq!(args, &vec!["--x".to_string()]);
+        assert!(env_keys.is_empty(), "env keys: {env_keys:?}");
+        assert_eq!(acp_id, "acp-session-1");
+    }
+
+    #[tokio::test]
+    async fn session_cwd_precedence_and_relative_resolution() {
+        // Task 2.2: session option → handle cwd → invocation directory;
+        // a relative handle cwd resolves against the invocation dir.
+        let dir = tempfile::tempdir().unwrap();
+        let abs_a = dir.path().join("abs-a");
+        let abs_b = dir.path().join("abs-b");
+        let rel = dir.path().join("rel").join("wt");
+        let rel2 = dir.path().join("rel2").join("wt");
+        std::fs::create_dir(&abs_a).unwrap();
+        std::fs::create_dir(&abs_b).unwrap();
+        std::fs::create_dir_all(&rel).unwrap();
+        std::fs::create_dir_all(&rel2).unwrap();
+        let script = dir.path().join("main.luau");
+        std::fs::write(
+            &script,
+            format!(
+                r#"local a = ptah.agent({{ command = "loopback", cwd = "{abs_a}" }})
+local s1 = a:session({{ id = "agent" }})
+local s2 = a:session({{ id = "session", cwd = "{abs_b}" }})
+local r = ptah.agent({{ command = "loopback", cwd = "rel/wt" }})
+local s3 = r:session({{ id = "rel" }})
+local plain = ptah.agent({{ command = "loopback" }})
+local s4 = plain:session({{ id = "default" }})
+local s5 = plain:session({{ id = "rel-session", cwd = "rel2/wt" }})
+"#,
+                abs_a = abs_a.display(),
+                abs_b = abs_b.display(),
+            ),
+        )
+        .unwrap();
+
+        let transport = Arc::new(LoopbackTransport::default());
+        let cfg = RunConfig {
+            script_path: script,
+            invocation_dir: dir.path().to_path_buf(),
+            registry: Registry::default(),
+            transport: transport.clone(),
+            process_runner: None,
+            interaction: InteractionMode::Unresolved,
+            shutdown: None,
+            renderer: Arc::new(RecordingSink::default()),
+            env: Default::default(),
+        };
+        let outcome = tokio::task::LocalSet::new().run_until(run(cfg)).await;
+        assert_eq!(outcome.code, 0, "error: {:?}", outcome.error);
+
+        let starts = transport.starts.lock().unwrap().clone();
+        assert_eq!(starts.len(), 5, "one start per session: {starts:?}");
+        // Tier 1: an explicit session cwd overrides the handle cwd.
+        assert_eq!(starts[0].1, abs_a);
+        assert_eq!(starts[1].1, abs_b);
+        // Tier 2: the handle cwd applies by default; a relative value
+        // resolves against the invocation directory.
+        assert_eq!(starts[2].0.as_deref(), Some("rel/wt"));
+        assert_eq!(starts[2].1, rel);
+        // Tier 3: no cwd anywhere → the invocation directory.
+        assert_eq!(starts[3].0, None);
+        assert_eq!(starts[3].1, dir.path());
+        // A relative *session option* resolves the same way (spec:
+        // "from the session options or the agent spec").
+        assert_eq!(starts[4].0, None);
+        assert_eq!(starts[4].1, rel2);
+    }
+
+    #[tokio::test]
+    async fn missing_cwd_fails_fast_before_spawn() {
+        // Task 2.2: a resolved cwd that does not exist raises a catchable
+        // Lua error at `session()` naming the directory, and no session
+        // starts (the command does not exist either, so a spawn attempt
+        // would fail on the command instead — proving fail-fast order).
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope").join("gone");
+        let script = dir.path().join("main.luau");
+        std::fs::write(
+            &script,
+            format!(
+                r#"local agent = ptah.agent({{ command = "/nonexistent/ptah-test-agent", cwd = "{missing}" }})
+local ok, err = pcall(function() return agent:session({{ id = "bad" }}) end)
+assert(not ok, "session() must reject a missing cwd")
+local msg = tostring(err)
+assert(msg:find("{missing}", 1, true), "must name the directory: " .. msg)
+assert(not msg:find("/nonexistent", 1, true), "must fail before spawning: " .. msg)
+"#,
+                missing = missing.display(),
+            ),
+        )
+        .unwrap();
+
+        let transport = Arc::new(LoopbackTransport::default());
+        let cfg = RunConfig {
+            script_path: script,
+            invocation_dir: dir.path().to_path_buf(),
+            registry: Registry::default(),
+            transport: transport.clone(),
+            process_runner: None,
+            interaction: InteractionMode::Unresolved,
+            shutdown: None,
+            renderer: Arc::new(RecordingSink::default()),
+            env: Default::default(),
+        };
+        let outcome = tokio::task::LocalSet::new().run_until(run(cfg)).await;
+        assert_eq!(outcome.code, 0, "error: {:?}", outcome.error);
+        assert!(
+            transport.starts.lock().unwrap().is_empty(),
+            "no session may start on a bad cwd"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_directory_cwd_fails_fast_before_spawn() {
+        // Task 2.2: an existing regular file is not a valid cwd either.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, "not a directory").unwrap();
+        let script = dir.path().join("main.luau");
+        std::fs::write(
+            &script,
+            format!(
+                r#"local agent = ptah.agent({{ command = "/nonexistent/ptah-test-agent" }})
+local ok, err = pcall(function() return agent:session({{ id = "bad", cwd = "{file}" }}) end)
+assert(not ok, "session() must reject a non-directory cwd")
+local msg = tostring(err)
+assert(msg:find("{file}", 1, true), "must name the path: " .. msg)
+assert(not msg:find("/nonexistent", 1, true), "must fail before spawning: " .. msg)
+"#,
+                file = file.display(),
+            ),
+        )
+        .unwrap();
+
+        let transport = Arc::new(LoopbackTransport::default());
+        let cfg = RunConfig {
+            script_path: script,
+            invocation_dir: dir.path().to_path_buf(),
+            registry: Registry::default(),
+            transport: transport.clone(),
+            process_runner: None,
+            interaction: InteractionMode::Unresolved,
+            shutdown: None,
+            renderer: Arc::new(RecordingSink::default()),
+            env: Default::default(),
+        };
+        let outcome = tokio::task::LocalSet::new().run_until(run(cfg)).await;
+        assert_eq!(outcome.code, 0, "error: {:?}", outcome.error);
+        assert!(
+            transport.starts.lock().unwrap().is_empty(),
+            "no session may start on a bad cwd"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_cwd_fails_fast_instead_of_falling_back() {
+        // Design decision: an empty cwd (e.g. an unset `${VAR}`) is not
+        // silently treated as the invocation directory — it fails the
+        // directory validation like any unusable path, before spawning.
+        // An empty *relative* path would otherwise join to the invocation
+        // directory and pass the `is_dir` probe.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("main.luau");
+        std::fs::write(
+            &script,
+            r#"local a = ptah.agent({ command = "/nonexistent/ptah-test-agent", cwd = "${PTAH_TEST_DEFINITELY_UNSET_CWD}" })
+local ok, err = pcall(function() return a:session({ id = "interp" }) end)
+assert(not ok, "an unset-${VAR} cwd must fail")
+assert(tostring(err):find("empty", 1, true), "must explain the empty cwd: " .. tostring(err))
+
+local b = ptah.agent({ command = "/nonexistent/ptah-test-agent" })
+local ok2, err2 = pcall(function() return b:session({ id = "explicit", cwd = "" }) end)
+assert(not ok2, "an explicit empty session cwd must fail")
+assert(tostring(err2):find("empty", 1, true), "must explain the empty cwd: " .. tostring(err2))
+"#,
+        )
+        .unwrap();
+
+        let transport = Arc::new(LoopbackTransport::default());
+        let cfg = RunConfig {
+            script_path: script,
+            invocation_dir: dir.path().to_path_buf(),
+            registry: Registry::default(),
+            transport: transport.clone(),
+            process_runner: None,
+            interaction: InteractionMode::Unresolved,
+            shutdown: None,
+            renderer: Arc::new(RecordingSink::default()),
+            env: Default::default(),
+        };
+        let outcome = tokio::task::LocalSet::new().run_until(run(cfg)).await;
+        assert_eq!(outcome.code, 0, "error: {:?}", outcome.error);
+        assert!(
+            transport.starts.lock().unwrap().is_empty(),
+            "no session may start on an empty cwd"
+        );
     }
 }

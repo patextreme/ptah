@@ -52,11 +52,13 @@ See `proposal.md` — Why. The current state that shapes the approach:
 - **`cwd: Option<String>` with `#[serde(default)]` on `AgentSpec`, interpolated
   in `AgentSpec::interpolate`.** TOML parsing, project/user merge, and
   `${VAR}` interpolation come from the existing derive + interpolation walk —
-  `ptah-config` needs no code change. Empty-string expansion of an unset
-  `${VAR}` in `cwd` is *not* special-cased: it fails the directory validation
-  like any unusable path, consistent with how an empty interpolated `command`
-  fails at spawn. (Alternative: resolve `${VAR}` to an error on unset —
-  rejected; it breaks the documented unset→empty contract for every field.)
+  `ptah-config` needs no code change. An empty resolved `cwd` (e.g. an unset
+  `${VAR}`, which expands to the empty string) is rejected explicitly at
+  `session()`, *before* the `is_dir` probe: a relative `""` would otherwise
+  join to the invocation directory and pass that probe, silently hiding a
+  misconfigured path instead of failing like any unusable value. (Alternative:
+  resolve `${VAR}` to an error on unset — rejected; it breaks the documented
+  unset→empty contract for every field.)
 
 - **Validation happens in the `agent:session` binding, on the final resolved
   cwd, before `transport.start_session`.** The binding is the only site that

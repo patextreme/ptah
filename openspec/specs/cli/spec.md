@@ -151,11 +151,15 @@ WHEN a script error escapes the main chunk uncaught, ptah SHALL cancel all in-fl
 - **THEN** ptah waits for outstanding tasks, prints the task's error to stderr, and exits non-zero
 
 ### Requirement: Session cwd defaults to invocation directory
-The default working directory for agent sessions SHALL be the directory from which `ptah run` was invoked, unless the script overrides it per session.
+The working directory for agent sessions SHALL be resolved at session creation (per the agent-sessions capability's resolution requirement): an explicit per-session `cwd` option wins; otherwise the agent's resolved `cwd` (inline spec or registry entry) applies; otherwise the default SHALL be the directory from which `ptah run` was invoked.
 
 #### Scenario: Default cwd
-- **WHEN** a session is created without an explicit `cwd`
+- **WHEN** a session is created without an explicit `cwd` from an agent with no resolved `cwd`
 - **THEN** the session's working directory is ptah's invocation directory
+
+#### Scenario: Agent-level cwd
+- **WHEN** a session is created without an explicit `cwd` from an agent whose spec carries `cwd = "/home/u/wt"`
+- **THEN** the session's working directory is `/home/u/wt`
 
 ### Requirement: Completions subcommand emits shell completion scripts
 The CLI SHALL provide `ptah completions <shell>`, where `<shell>` is a required positional argument accepting exactly `bash`, `zsh`, `fish`, `elvish`, and `powershell`. The command SHALL print the completion script for the named shell to standard output and SHALL print nothing else. Emitted scripts SHALL be generated from the binary's own command tree, so completions always match the installed binary's surface; hidden subcommands SHALL NOT appear in the emitted scripts. A missing or unknown `<shell>` argument SHALL be a usage error printing to standard error and exiting 2. The command SHALL NOT require a script, registry, or agent configuration and SHALL NOT touch the filesystem. The README SHALL document per-shell installation lines covering at least bash, zsh, and fish.
