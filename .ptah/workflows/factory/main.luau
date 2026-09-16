@@ -183,7 +183,7 @@ local function openPullRequest(brief: Brief, change: string?): string
 		else ("The changes for GitHub issue #%d are implemented."):format(brief.number)
 	local first = table.concat({
 		summary,
-		("Commit the uncommitted changes (except the .ptah directory) with a Conventional Commits message that references issue #%d, create or reuse the branch `issue-%d`, push it to the remote, and open a pull request against main using `gh`."):format(
+		("Commit the uncommitted changes with a Conventional Commits message that references issue #%d, create or reuse the branch `issue-%d`, push it to the remote, and open a pull request against main using `gh`."):format(
 			brief.number,
 			brief.number
 		),
