@@ -59,7 +59,8 @@ export type McpServerHttp = {
 export type McpServer = McpServerStdio | McpServerHttp
 
 -- Options for `agent:session(…)`. All fields optional; `id` defaults to
--- `s1, s2, …` per agent, `cwd` to the invocation directory. `resultSchema`
+-- `s1, s2, …` per agent, and `cwd` to the agent's own `cwd` (inline spec or
+-- registry entry), else the invocation directory. `resultSchema`
 -- is a JSON Schema expressed as a plain Luau table: when set, the session
 -- gets a typed-result contract — prompts carry a submit-tool instruction
 -- and the outcome's `result` field carries the accepted submission.
@@ -104,6 +105,7 @@ export type AgentSpec = {
 	command: string,
 	args: { string }?,
 	env: { [string]: string }?,
+	cwd: string?,
 }
 
 -- Options for `ptah.parallel(items, fn, …)`.
