@@ -260,4 +260,48 @@ command = "gemini-acp"
             Some(ptah_core::config::AskProviderKind::None)
         );
     }
+
+    // ------------------------------------------------------------------
+    // cwd (agent-level-cwd change)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cwd_survives_discovery_and_merge_raw_and_resolved() {
+        // A `cwd` on a registry entry flows through TOML parsing and the
+        // project/user merge: the raw (authored) view keeps `${VAR}`,
+        // while resolve interpolates it.
+        const USER_CWD: &str = "\
+[agents.claude]\ncommand = \"claude-acp-user\"\ncwd = \"${WORKTREE}\"\n";
+        const PROJECT_CWD: &str = "\
+[agents.claude]\ncommand = \"claude-acp-project\"\ncwd = \"/home/u/project-wt\"\n";
+
+        let lookup = |var: &str| -> Option<String> {
+            match var {
+                "WORKTREE" => Some("/home/u/repo-wt".into()),
+                _ => None,
+            }
+        };
+
+        // Project wins wholesale: its cwd is the authored value.
+        let reg = from_parts(Some(USER_CWD), Some(PROJECT_CWD)).unwrap();
+        assert_eq!(
+            reg.raw("claude").unwrap().cwd.as_deref(),
+            Some("/home/u/project-wt")
+        );
+        assert_eq!(
+            reg.resolve_with("claude", &lookup).unwrap().cwd.as_deref(),
+            Some("/home/u/project-wt")
+        );
+
+        // User-only: raw keeps `${VAR}`, resolve substitutes it.
+        let reg = from_parts(Some(USER_CWD), None).unwrap();
+        assert_eq!(
+            reg.raw("claude").unwrap().cwd.as_deref(),
+            Some("${WORKTREE}")
+        );
+        assert_eq!(
+            reg.resolve_with("claude", &lookup).unwrap().cwd.as_deref(),
+            Some("/home/u/repo-wt")
+        );
+    }
 }

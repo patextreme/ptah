@@ -280,6 +280,43 @@ local codex = ptah.agent({
 })
 ```
 
+Both sources accept an optional `cwd` — the working directory for the
+agent's sessions:
+
+```toml
+[agents.claude]
+command = "npx"
+args = ["-y", "@agentclientprotocol/claude-agent-acp@latest"]
+cwd = "worktrees/42"
+```
+
+```lua
+local codex = ptah.agent({
+    command = "npx",
+    args = { "-y", "@agentclientprotocol/codex-acp@latest" },
+    cwd = "/home/u/repo-wt",
+})
+```
+
+`${VAR}` interpolates `cwd` like `command`/`args`/`env`. A session's
+working directory is resolved per session by precedence: the
+`agent:session({ cwd = … })` option wins, then the agent's `cwd` (inline
+spec or registry entry, after interpolation), then ptah's invocation
+directory. A relative `cwd` — from the session option or the agent spec —
+resolves against ptah's invocation directory. A resolved directory that is
+empty, does not exist, or is not a directory raises a catchable Lua error at
+`session()` (naming it, or explaining the empty value), before any agent
+subprocess spawns.
+
+A git-worktree workflow can give each agent its own checkout: create the
+worktree with `git worktree add` (ptah never creates or removes worktrees),
+then point the agent at it with `cwd` — inline at the call site, in the
+registry entry, or per session. `cwd` reaches the agent as the session's
+working directory (it travels in the ACP `session/new` request); the agent
+subprocess itself still spawns in ptah's own working directory. `ptah.exec`
+is unaffected — shell steps keep inheriting ptah's process working
+directory (see [Running shell commands](#running-shell-commands-ptahexec)).
+
 ### The `[ask]` section (global)
 
 Registry files may also define `[ask]` — the registry's first global
@@ -378,8 +415,8 @@ asking only; the permission posture above is unaffected by it.
 
 | API | Description |
 | --- | --- |
-| `ptah.agent(name_or_spec)` | Agent factory (registry name or inline `{command=, args=, env=}` spec) |
-| `agent:session({id=, cwd=, mcpServers=, resultSchema=})` | New session (own subprocess); `id` defaults to `s1, s2, …`; `resultSchema` declares a typed-result contract (see below); session config options are applied with `setConfig` after creation (see below) |
+| `ptah.agent(name_or_spec)` | Agent factory (registry name or inline `{command=, args=, env=, cwd=}` spec) |
+| `agent:session({id=, cwd=, mcpServers=, resultSchema=})` | New session (own subprocess); `id` defaults to `s1, s2, …`; `cwd` wins over the agent's resolved `cwd`, which wins over ptah's invocation directory (a relative `cwd` resolves against the invocation directory) — see [Agent registry](#agent-registry); `resultSchema` declares a typed-result contract (see below); session config options are applied with `setConfig` after creation (see below) |
 | `session:prompt(text, {timeoutMs=})` | One turn → `{ text, stopReason, usage, result }` (`result` is the turn's typed-result value, `nil` without one; `__tostring` → text; `text` is the turn's last agent message — see below); concurrent `prompt` calls on one session queue behind the in-flight turn |
 | `session:cancel()` | Cancels the in-flight turn (returns `stopReason = "cancelled"`) |
 | `session:close()` | Ends the session and reaps the agent process |

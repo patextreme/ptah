@@ -46,11 +46,14 @@ assert(r.usage.cacheRead == 0, "usage.cacheRead: " .. tostring(r.usage.cacheRead
 assert(r.usage.cacheWrite == 0, "usage.cacheWrite: " .. tostring(r.usage.cacheWrite))
 assert(tostring(r) == r.text, "tostring sugar: " .. tostring(r))
 
--- ptah.agent(AgentSpec: command, args, env) — registry-free.
+-- ptah.agent(AgentSpec: command, args, env, cwd) — registry-free, with
+-- an explicit `cwd` (the session working directory; relative resolves
+-- against the invocation directory).
 local inline = ptah.agent({
 	command = "@MOCK_BIN@",
 	args = {},
 	env = { MOCK_CHUNKS = "inline reply" },
+	cwd = ".",
 })
 local si = inline:session()
 local ri = si:prompt("ignored")

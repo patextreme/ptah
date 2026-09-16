@@ -46,6 +46,9 @@
 //!   that variable's value (for env-inheritance tests)
 //! - `MOCK_ECHO_CWD`    — each prompt replies with the session's `cwd`
 //!   (for default-cwd tests)
+//! - `MOCK_SESSION_LOG` — file path: append the `cwd` of every
+//!   `session/new` to this file, one line per session (for tests that
+//!   assert a session was never created)
 //! - `MOCK_ECHO_MCP`    — each prompt replies with the JSON of the
 //!   `mcpServers` config received at `session/new`
 //! - `MOCK_MCP_LIST`    — each prompt replies with a JSON listing of the
@@ -474,6 +477,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _cx| {
                     let n = session_counter.fetch_add(1, Ordering::SeqCst) + 1;
                     *turn.session_cwd.lock().unwrap() = Some(req.cwd.display().to_string());
+                    // MOCK_SESSION_LOG: append each session's cwd, so a
+                    // test can assert no session was ever created.
+                    if let Ok(path) = std::env::var("MOCK_SESSION_LOG") {
+                        if !path.is_empty() {
+                            use std::io::Write as _;
+                            let mut file = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&path)
+                                .expect("MOCK_SESSION_LOG must be writable");
+                            writeln!(file, "{}", req.cwd.display())
+                                .expect("write MOCK_SESSION_LOG");
+                        }
+                    }
                     start_mcp_servers(&mcp, &req.mcp_servers).await;
                     let _ = AgentCapabilities::new();
                     let mut response = NewSessionResponse::new(format!("mock-session-{n}"));

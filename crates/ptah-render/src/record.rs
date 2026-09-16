@@ -1057,6 +1057,7 @@ mod tests {
             command: "npx".into(),
             args: vec!["--key".into(), "${ANTHROPIC_API_KEY}".into()],
             env: BTreeMap::from([("TOKEN".into(), "${ANTHROPIC_API_KEY}".into())]),
+            cwd: None,
         };
         let resolved = authored.interpolate(&|_| Some("sk-live-secret".to_string()));
         record

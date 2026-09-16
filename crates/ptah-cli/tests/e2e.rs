@@ -379,6 +379,122 @@ s:close()
 }
 
 #[test]
+fn inline_spec_cwd_lands_in_session() {
+    // agent-sessions spec "Inline spec with cwd" / "Agent cwd applies by
+    // default": an inline spec `cwd` becomes the session's working
+    // directory (the mock echoes it).
+    let dir = tmpdir("inline-cwd");
+    let wt = dir.join("worktree");
+    std::fs::create_dir_all(&wt).unwrap();
+    let script = write_script(
+        &dir,
+        &format!(
+            r#"
+local agent = ptah.agent({{ command = "{mock}", cwd = "{wt}", env = {{ MOCK_ECHO_CWD = "1" }} }})
+local s = agent:session()
+local r = s:prompt("where am I")
+assert(r.text == "{wt}", "cwd was " .. tostring(r.text))
+s:close()
+"#,
+            mock = mock_agent(),
+            wt = wt.display(),
+        ),
+    );
+    let out = run(&script, &dir);
+    assert_eq!(out.code, 0, "error: {:?}", out.error);
+}
+
+#[test]
+fn registry_agent_cwd_defaults_and_session_overrides() {
+    // agent-registry spec "Entry with cwd" + agent-sessions spec
+    // "Session option overrides agent cwd": a registry entry's `cwd` is
+    // the default session directory, and an explicit session `cwd`
+    // overrides it.
+    let dir = tmpdir("registry-cwd");
+    let default_wt = dir.join("wt-default");
+    let override_wt = dir.join("wt-override");
+    let session_log = dir.join("sessions.log");
+    std::fs::create_dir_all(&default_wt).unwrap();
+    std::fs::create_dir_all(&override_wt).unwrap();
+    let project_config = format!(
+        "[agents.mock]\ncommand = \"{mock}\"\ncwd = \"{cwd}\"\n\n[agents.mock.env]\nMOCK_ECHO_CWD = \"1\"\nMOCK_SESSION_LOG = \"{log}\"\n",
+        mock = mock_agent(),
+        cwd = default_wt.display(),
+        log = session_log.display(),
+    );
+    let registry = ptah::config_fs::from_parts(None, Some(project_config.as_str())).unwrap();
+    let script = write_script(
+        &dir,
+        &format!(
+            r#"
+local agent = ptah.agent("mock")
+local s1 = agent:session({{ id = "default" }})
+local r1 = s1:prompt("where am I")
+assert(r1.text == "{default}", "default cwd was " .. tostring(r1.text))
+s1:close()
+local s2 = agent:session({{ id = "override", cwd = "{override}" }})
+local r2 = s2:prompt("where am I")
+assert(r2.text == "{override}", "override cwd was " .. tostring(r2.text))
+s2:close()
+"#,
+            default = default_wt.display(),
+            override = override_wt.display(),
+        ),
+    );
+    let out = run_with_registry(&script, &dir, registry);
+    assert_eq!(out.code, 0, "error: {:?}", out.error);
+
+    // The mock records every `session/new` cwd in MOCK_SESSION_LOG: this
+    // positively exercises that capability and proves both sessions
+    // actually reached the agent with the expected directories (which is
+    // what makes the negative missing-cwd test's "no log file" proxy
+    // meaningful).
+    let log = std::fs::read_to_string(&session_log).expect("session log written");
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        vec![
+            default_wt.to_str().unwrap(),
+            override_wt.to_str().unwrap()
+        ],
+        "session log: {log:?}"
+    );
+}
+
+#[test]
+fn missing_session_cwd_raises_and_no_session_reaches_agent() {
+    // agent-sessions spec "Missing directory fails fast": the resolved
+    // cwd is validated at `session()`, raising a catchable Lua error
+    // naming the directory; the mock agent records no session (its
+    // MOCK_SESSION_LOG stays absent), so no subprocess reached
+    // `session/new`.
+    let dir = tmpdir("missing-cwd");
+    let missing = dir.join("does-not-exist");
+    let session_log = dir.join("sessions.log");
+    let script = write_script(
+        &dir,
+        &format!(
+            r#"
+local agent = ptah.agent({{ command = "{mock}", cwd = "{missing}", env = {{ MOCK_SESSION_LOG = "{log}" }} }})
+local ok, err = pcall(function() return agent:session({{ id = "bad" }}) end)
+assert(not ok, "session() must reject a missing cwd")
+local msg = tostring(err)
+assert(msg:find("{missing}", 1, true), "must name the directory: " .. msg)
+"#,
+            mock = mock_agent(),
+            missing = missing.display(),
+            log = session_log.display(),
+        ),
+    );
+    let out = run(&script, &dir);
+    assert_eq!(out.code, 0, "error: {:?}", out.error);
+    assert!(
+        !session_log.exists(),
+        "mock agent must record no session, but {} exists",
+        session_log.display()
+    );
+}
+
+#[test]
 fn two_agent_calls_same_name_give_independent_factories() {
     // Scripting spec "Agent and session API": two ptah.agent calls for the
     // same name return independent factory objects (independent s1/s2

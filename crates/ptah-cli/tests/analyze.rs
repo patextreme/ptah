@@ -226,6 +226,40 @@ fn real_luau_lsp_definitions_contract() {
         "happy-path script must analyze clean, stderr:\n{stderr}"
     );
 
+    // type-definitions "AgentSpec cwd type-checks" (accepting side): a
+    // strict script passing a string `cwd` in an inline spec analyzes
+    // clean.
+    let p = Project::new("good-agent-cwd");
+    let script = p.write(
+        "--!strict\n\
+         local agent = ptah.agent({ command = \"acp\", cwd = \"/tmp/wt\" })\n\
+         print(agent)\n",
+    );
+    let (code, stdout, stderr) = p.check(&script, lsp_dir);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        !stderr.contains("TypeError"),
+        "string cwd must analyze clean, stderr:\n{stderr}"
+    );
+
+    // type-definitions "AgentSpec cwd type-checks" (rejecting side):
+    // the inline `AgentSpec` declares `cwd: string?`, so a non-string
+    // value reports a diagnostic naming the `cwd` field. (Accepting
+    // side: the strict probe fixture passes `cwd = "."` and creates a
+    // session from it — nix ptah-analyze.)
+    let p = Project::new("bad-agent-cwd");
+    let script = p.write(
+        "--!strict\n\
+         local agent = ptah.agent({ command = \"acp\", cwd = 42 })\n\
+         print(agent)\n",
+    );
+    let (code, _stdout, stderr) = p.check(&script, lsp_dir);
+    assert_eq!(code, 1, "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("cwd"),
+        "diagnostic must name the cwd field, stderr:\n{stderr}"
+    );
+
     // type-definitions "Exec result fields type-check" / "Exec options
     // type-checks" / "JSON module type-checks" (shell-exec surface):
     // a strict exec+json script analyzes clean, and each documented

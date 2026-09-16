@@ -1,10 +1,4 @@
-# Agent Registry Specification
-
-## Purpose
-
-Defines how agent launch specifications are configured and resolved: TOML registry files, project/user precedence, environment variable interpolation, and inline overrides from scripts.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: TOML agent registry
 Agent definitions SHALL be configured in TOML: a project-level `.ptah/config.toml` and a user-level `~/.config/ptah/config.toml`. Each agent entry SHALL define `command` (program path), and MAY define `args` (argument list), `env` (string-to-string map merged over the inherited environment), and `cwd` (working directory for the agent's sessions, overriding the invocation-directory default unless a session overrides it). Project entries SHALL override user entries for the same agent name; the two files otherwise merge.
@@ -54,29 +48,3 @@ String values in agent registry entries SHALL support `${VAR}` interpolation fro
 #### Scenario: Inline spec with cwd
 - **WHEN** a script calls `ptah.agent({ command = "npx", args = {"-y", "@agentclientprotocol/claude-agent-acp"}, cwd = "/path/to/worktree" })`
 - **THEN** the resulting sessions use that working directory unless the session options override it
-
-### Requirement: Agent environment inheritance
-Agent subprocesses SHALL inherit ptah's environment with the entry's `env` values merged on top; `env` values SHALL also undergo `${VAR}` interpolation.
-
-#### Scenario: Env merge
-- **WHEN** an entry sets `env = { ANTHROPIC_MODEL = "${MODEL}" }` with `MODEL=opus`
-- **THEN** the spawned agent sees `ANTHROPIC_MODEL=opus` in addition to the inherited environment
-
-### Requirement: Global ask section
-Registry config files MAY define a top-level `[ask]` section — the registry's first global (non-agent) data — carrying a single `provider` key (string). The section SHALL be validated at discovery: a missing `provider` key or a value that is not a known provider name (`stdin` or `none` in v1) SHALL fail registry discovery with an error naming the config layer (`user` or `project`), the section, and the accepted values. Agent merge semantics are unchanged by the section's presence. Across layers, `[ask]` SHALL be replaced wholesale: when both project and user configs define `[ask]`, the project section wins in its entirety, and when only one layer defines it, that section applies. Provider credentials SHALL NOT be stored in registry files; v1's section has no settings beyond `provider`.
-
-#### Scenario: Project section replaces user section wholesale
-- **WHEN** the user config sets `[ask] provider = "none"` and the project config sets `[ask] provider = "stdin"`
-- **THEN** the effective ask provider is `stdin`
-
-#### Scenario: User-only section applies
-- **WHEN** only the user config defines `[ask] provider = "none"` and the project config has no `[ask]` section
-- **THEN** the effective ask provider is `none`
-
-#### Scenario: Unknown provider value fails discovery
-- **WHEN** a config file sets `[ask] provider = "stdni"`
-- **THEN** registry discovery fails with an error naming the config layer and the accepted provider values
-
-#### Scenario: Absent section parses cleanly
-- **WHEN** a registry file defines only `[agents.*]` entries
-- **THEN** it parses exactly as before; no ask configuration is contributed
