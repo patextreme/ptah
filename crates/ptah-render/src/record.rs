@@ -254,11 +254,7 @@ struct RecordState {
 
 impl RunRecord {
     /// Create the record for a run that starts now.
-    pub fn create(
-        invocation_dir: &Path,
-        script: &Path,
-        argv: &[String],
-    ) -> io::Result<RunRecord> {
+    pub fn create(invocation_dir: &Path, script: &Path, argv: &[String]) -> io::Result<RunRecord> {
         Self::create_at(invocation_dir, script, argv, Timestamp::now())
     }
 
@@ -600,8 +596,13 @@ mod tests {
     }
 
     fn record_in(dir: &Path) -> RunRecord {
-        RunRecord::create_at(dir, Path::new("main.luau"), &["ptah".into(), "run".into()], start())
-            .unwrap()
+        RunRecord::create_at(
+            dir,
+            Path::new("main.luau"),
+            &["ptah".into(), "run".into()],
+            start(),
+        )
+        .unwrap()
     }
 
     fn session(label: &str, acp_id: &str) -> SessionRecord {
@@ -750,7 +751,11 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(entries.len(), 1, "only the ignore path may remain: {entries:?}");
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the ignore path may remain: {entries:?}"
+        );
     }
 
     #[test]
@@ -828,7 +833,10 @@ mod tests {
 
     impl EventSink for RecordingSink {
         fn emit(&self, label: &str, event: SessionEvent) {
-            self.0.lock().unwrap().push(format!("emit:{label}:{event:?}"));
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("emit:{label}:{event:?}"));
         }
         fn script_log(&self, message: &str) {
             self.0.lock().unwrap().push(format!("log:{message}"));
@@ -1008,7 +1016,10 @@ mod tests {
         record.session_ready(session("mock/s1", "acp-1")).unwrap();
         let before = fs::read_to_string(record.dir().join("run.json")).unwrap();
         assert_eq!(
-            serde_json::from_str::<RunMeta>(&before).unwrap().sessions.len(),
+            serde_json::from_str::<RunMeta>(&before)
+                .unwrap()
+                .sessions
+                .len(),
             1
         );
         // Interrupt the next write: a directory occupies the sibling temp
