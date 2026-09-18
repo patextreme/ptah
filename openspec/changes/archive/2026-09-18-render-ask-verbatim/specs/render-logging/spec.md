@@ -9,11 +9,13 @@ line (`{label}: {first line}`), each further line of the prompt as one
 indented line beneath it, and — when details were provided — each line of the
 details as one indented line beneath the prompt, followed by an input cue.
 Ask prose SHALL render verbatim: authored line structure (interior newlines
-and blank lines) preserved with no whitespace collapse, trailing blank lines
-trimmed, and no truncation — ask lines are exempt from the shared
-visible-char budget that governs prompt lines, because asks are required
-interaction, and an unreadable prompt is a hung run in exactly the way a
-suppressed one is (the same principle as the `--quiet` bypass). On
+and blank lines) preserved with no whitespace collapse, leading and
+trailing blank lines trimmed, and no truncation — ask lines are exempt
+from the shared visible-char budget that governs prompt lines, because
+asks are required interaction, and an unreadable prompt is a hung run in
+exactly the way a suppressed one is (the same principle as the `--quiet`
+bypass). A prompt that is blank after trimming (an empty or all-blank
+prompt) renders the label line with no text after its colon. On
 resolution, one line SHALL carry the ask number and the action (`respond` or
 `abort`); the response text SHALL NOT be re-echoed by ptah (the terminal
 already shows what was typed). Ask lines SHALL render even under `--quiet`:

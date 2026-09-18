@@ -53,11 +53,16 @@ rather than breaking, and any ceiling is a fidelity cliff with an
 unjustifiable constant — exactly the failure mode this change removes.
 Verbatim means verbatim.
 
-**3. Trailing blank lines trimmed; interior structure preserved.**
+**3. Leading and trailing blank lines trimmed; interior structure
+preserved.**
 A prompt ending `"...?\n"` must not gain a dangling empty row before the
-cue, so trailing newlines are stripped for display only. Interior blank
-lines are structure the author wrote — they stay. This is display-side
-only; the event payload and the record keep the raw text.
+cue, and a prompt *beginning* with a blank line (`"\nQuestion?"`) or a
+fully blank prompt (`""`) must not put an empty payload on the label
+line (a trailing-whitespace row) — so leading blank lines are trimmed
+the same way and a blank-after-trimming prompt renders the label line
+with no text after its colon. Interior blank lines are structure the
+author wrote — they stay. This is display-side only; the event payload
+and the record keep the raw text.
 
 **4. Continuation lines go through the same timestamped `ask_line` path.**
 Each rendered row — including indented continuations — carries the
