@@ -267,17 +267,19 @@ impl Renderer {
         let _ = inner.out.flush();
     }
 
-    /// `AskRequested`: the prompt line, an indented details line when
-    /// present, then the `> ` input cue — written without a trailing
-    /// newline and flushed (the user's own Enter terminates the visual
-    /// line; over pipes the next rendered line simply follows). The
-    /// provider first polls stdin only after this returns, so the
-    /// prompt is on screen before input is read.
+    /// `AskRequested`: the ask's prose rows — the prompt's first line
+    /// riding the label line, its further lines and any details lines
+    /// indented beneath it — each through the timestamped `ask_line`
+    /// path, then the `> ` input cue: written without a trailing
+    /// newline and flushed, landing alone on the row after the last
+    /// prose row (the user's own Enter terminates the visual line; over
+    /// pipes the next rendered line simply follows). The provider first
+    /// polls stdin only after this returns, so the prompt is on screen
+    /// before input is read.
     fn ask_requested(&self, label: &str, prompt: &str, details: Option<&str>) {
         let mut inner = self.inner.lock().unwrap();
-        self.ask_line(&mut inner, &ask_prompt_line(label, prompt));
-        if let Some(details) = details {
-            self.ask_line(&mut inner, &ask_details_line(details));
+        for line in ask_prose_lines(label, prompt, details) {
+            self.ask_line(&mut inner, &line);
         }
         let _ = write!(inner.out, "> ");
         let _ = inner.out.flush();
@@ -351,17 +353,67 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
-/// Prompt line body for one ask: the attribution label plus the
-/// prompt, whitespace-collapsed and truncated under the shared
-/// visible-char budget (the same mechanics as prompt lines).
-fn ask_prompt_line(label: &str, prompt: &str) -> String {
-    format!("{label}: {}", prompt_preview(prompt))
+/// A rendered ask row is blank when its source line is empty or
+/// whitespace-only: blank lines carry no content to read, wherever
+/// they sit.
+fn ask_line_is_blank(line: &str) -> bool {
+    line.trim().is_empty()
 }
 
-/// Details line body for one ask: an indented continuation line under
-/// the prompt, same collapse/truncate mechanics.
-fn ask_details_line(details: &str) -> String {
-    format!("  {}", prompt_preview(details))
+/// The authored lines of one ask prose field (prompt or details),
+/// verbatim — no whitespace collapse, no truncation. Leading and
+/// trailing blank lines are trimmed (display-side only; the event and
+/// the run record keep the raw text); interior lines are kept exactly
+/// as written, blank ones included. A text that is blank after
+/// trimming yields no lines.
+fn ask_prose_rows(text: &str) -> Vec<&str> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let Some(first) = lines.iter().position(|l| !ask_line_is_blank(l)) else {
+        return Vec::new();
+    };
+    // `first` exists, so `rposition` cannot miss; blank runs at both
+    // edges fall away.
+    let last = lines.iter().rposition(|l| !ask_line_is_blank(l)).unwrap();
+    lines[first..=last].to_vec()
+}
+
+/// One indented ask continuation row: prompt lines after the first
+/// and every details line render two spaces in under the label line.
+/// A blank line renders empty — no indent padding, so no row is
+/// padding-only.
+fn ask_continuation(line: &str) -> String {
+    if ask_line_is_blank(line) {
+        String::new()
+    } else {
+        format!("  {line}")
+    }
+}
+
+/// Every rendered row of one ask, verbatim. The prompt's first line
+/// rides the label line (`{label}: {first}`); a prompt that is blank
+/// after trimming leaves no text after the colon. Each further prompt
+/// line and each details line renders as an indented continuation row
+/// beneath it. Ask prose is exempt from the shared visible-char
+/// budget: asks are required interaction, and an unreadable prompt is
+/// a hung run in exactly the way a suppressed one is (the same
+/// principle as the `--quiet` bypass).
+fn ask_prose_lines(label: &str, prompt: &str, details: Option<&str>) -> Vec<String> {
+    let mut lines = Vec::new();
+    let rows = ask_prose_rows(prompt);
+    if let Some((first, rest)) = rows.split_first() {
+        lines.push(format!("{label}: {first}"));
+        for line in rest {
+            lines.push(ask_continuation(line));
+        }
+    } else {
+        lines.push(format!("{label}:"));
+    }
+    if let Some(details) = details {
+        for line in ask_prose_rows(details) {
+            lines.push(ask_continuation(line));
+        }
+    }
+    lines
 }
 
 /// Resolution line body: the attribution label plus the action
@@ -598,13 +650,13 @@ mod tests {
 
     #[test]
     fn ask_line_bodies_carry_attribution_and_action() {
-        // Prompt: label plus collapsed prompt; details: indented
-        // continuation; resolution: label plus action, never the text.
+        // Prompt: first line rides the label line, interior whitespace
+        // stays verbatim (no collapse); resolution: label plus the
+        // action, never the text.
         assert_eq!(
-            ask_prompt_line("ask 1 main.luau", "Blocked: how   to\ncontinue?"),
-            "ask 1 main.luau: Blocked: how to continue?"
+            ask_prose_lines("ask 1 main.luau", "Blocked: how   to\ncontinue?", None),
+            ["ask 1 main.luau: Blocked: how   to", "  continue?",]
         );
-        assert_eq!(ask_details_line("probe output …"), "  probe output …");
         assert_eq!(
             ask_resolved_line("ask 2 main.luau", AskAction::Respond),
             "ask 2 main.luau: respond"
@@ -616,31 +668,134 @@ mod tests {
     }
 
     #[test]
-    fn ask_prompt_and_details_truncate_under_the_shared_budget() {
+    fn ask_prose_renders_in_full_beyond_the_shared_budget() {
+        // Ask prose is exempt from the shared visible-char budget: a
+        // prompt or details line longer than LINE_BUDGET renders in
+        // full — no `…` truncation marker on any ask line.
         let label = "ask 1 main.luau";
         let long = "y".repeat(LINE_BUDGET + 10);
         assert_eq!(
-            ask_prompt_line(label, &long),
-            format!("{label}: {}…", "y".repeat(LINE_BUDGET))
+            ask_prose_lines(label, &long, None),
+            [format!("{label}: {long}")]
         );
         assert_eq!(
-            ask_details_line(&long),
-            format!("  {}…", "y".repeat(LINE_BUDGET))
+            ask_prose_lines(label, "Proceed?", Some(&long)),
+            [
+                String::from("ask 1 main.luau: Proceed?"),
+                format!("  {long}")
+            ]
         );
     }
 
     #[test]
-    fn ask_events_render_prompt_details_cue_and_resolution() {
-        // Full event path through a real renderer over a shared buffer:
-        // prompt line, indented details line, `> ` cue without newline,
-        // resolution line with the action only — the answer text never
-        // appears in any ptah-rendered line.
+    fn ask_multi_line_prompt_indents_continuations() {
+        // First line on the label, each authored further line one
+        // indented row beneath it.
+        assert_eq!(
+            ask_prose_lines(
+                "ask 1 main.luau",
+                "How to continue?\nPick one:\n1. retry\n2. abort",
+                None
+            ),
+            [
+                "ask 1 main.luau: How to continue?",
+                "  Pick one:",
+                "  1. retry",
+                "  2. abort",
+            ]
+        );
+    }
+
+    #[test]
+    fn ask_details_render_as_an_indented_block() {
+        // Each details line is one indented row beneath the prompt,
+        // multi-line details included.
+        assert_eq!(
+            ask_prose_lines(
+                "ask 1 main.luau",
+                "Proceed?",
+                Some("probe output …\nexit 3")
+            ),
+            ["ask 1 main.luau: Proceed?", "  probe output …", "  exit 3",]
+        );
+    }
+
+    #[test]
+    fn ask_interior_blank_lines_render_empty() {
+        // Authored structure preserved: an interior blank line renders
+        // as an empty row — no indent padding. Whitespace-only lines
+        // are blank.
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", "Question?\n\nOptions follow", None),
+            ["ask 1 main.luau: Question?", "", "  Options follow"]
+        );
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", "Question?\n   \nOptions", None),
+            ["ask 1 main.luau: Question?", "", "  Options"]
+        );
+    }
+
+    #[test]
+    fn ask_leading_and_trailing_blank_lines_trim() {
+        // `"Question?\n"` gains no dangling empty row before the cue;
+        // a leading blank line puts no empty payload on the label row;
+        // blank runs at both edges fall away entirely. Details trim the
+        // same way.
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", "Question?\n", None),
+            ["ask 1 main.luau: Question?"]
+        );
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", "\nQuestion?", None),
+            ["ask 1 main.luau: Question?"]
+        );
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", "\n\nA\n\nB\n\n\n", None),
+            ["ask 1 main.luau: A", "", "  B"]
+        );
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", "Proceed?", Some("hint\n")),
+            ["ask 1 main.luau: Proceed?", "  hint"]
+        );
+    }
+
+    #[test]
+    fn ask_blank_prompt_renders_the_bare_label_line() {
+        // An empty or all-blank prompt leaves no text after the colon;
+        // details still render beneath the bare label row, and an
+        // all-blank details block renders no rows.
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", "", None),
+            ["ask 1 main.luau:"]
+        );
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", " \n\t\n", None),
+            ["ask 1 main.luau:"]
+        );
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", "", Some("decide now")),
+            ["ask 1 main.luau:", "  decide now"]
+        );
+        assert_eq!(
+            ask_prose_lines("ask 1 main.luau", "Proceed?", Some(" \n ")),
+            ["ask 1 main.luau: Proceed?"]
+        );
+    }
+
+    #[test]
+    fn ask_events_render_verbatim_prose_and_resolution() {
+        // Full event path through a real renderer over a shared
+        // buffer: label line, indented continuations (interior blank
+        // line empty), indented details block — each row timestamped
+        // and `[ptah]`-attributed — then the resolution line with the
+        // action only; the answer text never appears in any
+        // ptah-rendered line.
         let out = SharedOut::default();
         let renderer = Renderer::with_writer(RenderOptions::default(), out.clone());
         renderer.emit(
             "ask 1 main.luau",
             SessionEvent::AskRequested {
-                prompt: "Blocked: how to continue?".into(),
+                prompt: "Blocked: how to continue?\nPick one:\n\n1. retry\n2. abort".into(),
                 details: Some("probe output …".into()),
             },
         );
@@ -653,12 +808,47 @@ mod tests {
         );
         let text = out.text();
         let stripped = crate_test_strip(&text);
-        assert!(stripped.contains("[ptah] ask 1 main.luau: Blocked: how to continue?"), "{text}");
-        assert!(stripped.contains("[ptah]   probe output …"), "{text}");
-        // The cue: no newline after it, and flushed.
-        assert!(text.ends_with("> ") || text.contains("> "), "{text}");
-        assert!(stripped.contains("[ptah] ask 1 main.luau: respond"), "{text}");
-        assert!(!stripped.contains("secret answer"), "answer must not re-echo: {text}");
+        // The blank interior row carries attribution only (no indent
+        // padding), exactly like every other row.
+        let expected = [
+            "[ptah] ask 1 main.luau: Blocked: how to continue?",
+            "[ptah]   Pick one:",
+            "[ptah] ",
+            "[ptah]   1. retry",
+            "[ptah]   2. abort",
+            "[ptah]   probe output …",
+        ]
+        .join("\n");
+        assert!(stripped.contains(&expected), "{text}");
+        assert!(
+            stripped.contains("[ptah] ask 1 main.luau: respond"),
+            "{text}"
+        );
+        assert!(
+            !stripped.contains("secret answer"),
+            "answer must not re-echo: {text}"
+        );
+    }
+
+    #[test]
+    fn ask_cue_lands_on_the_row_after_the_last_prose_line() {
+        // Every prose row is newline-terminated; the `> ` cue is the
+        // final write, with no newline of its own — alone on the next
+        // row, so the user's typed answer starts at the cue.
+        let out = SharedOut::default();
+        let renderer = Renderer::with_writer(RenderOptions::default(), out.clone());
+        renderer.ask_requested(
+            "ask 1 main.luau",
+            "Multi-line\nquestion\n\nfollow-up",
+            Some("detail line"),
+        );
+        let text = out.text();
+        let cue = text.find("> ").expect("cue present");
+        assert_eq!(&text[cue..], "> ", "cue is the final write: {text:?}");
+        assert!(
+            text[..cue].ends_with('\n'),
+            "cue follows the last prose row's newline: {text:?}"
+        );
     }
 
     #[test]
@@ -729,12 +919,22 @@ mod tests {
         );
     }
 
-    /// Strip the leading `yyyy-mm-dd HH:MM:SS ` timestamp from every
+    /// Strip the leading timestamp — `yyyy-mm-dd HH:MM:SS ` plain, or
+    /// wrapped in the dim/`RESET` pair in colored mode — from every
     /// line (test-local; the integration suite has its own).
     fn crate_test_strip(output: &str) -> String {
         output
             .lines()
-            .map(|l| if l.len() >= 20 && l.as_bytes()[19] == b' ' { &l[20..] } else { l })
+            .map(|l| {
+                // `{DIM}{ts}{RESET} `: 4 + 19 + 4 bytes, then the space.
+                if l.starts_with(DIM) && l.len() >= 28 && l.as_bytes()[27] == b' ' {
+                    &l[28..]
+                } else if l.len() >= 20 && l.as_bytes()[19] == b' ' {
+                    &l[20..]
+                } else {
+                    l
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
