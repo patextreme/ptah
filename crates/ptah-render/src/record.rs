@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use jiff::Timestamp;
+use petname::Petnames;
 use ptah_core::events::{AskAction, SessionEvent};
 use ptah_core::ports::EventSink;
 use serde::{Deserialize, Serialize};
@@ -84,11 +85,11 @@ pub fn run_start_line(record_dir: &Path, invocation_dir: &Path, home: Option<&Pa
     )
 }
 
-/// A run's identity: the UTC start instant as `yyyymmddhhmmss`, a `-`, and a
-/// short decimal suffix that breaks same-second collisions. The timestamp
-/// prefix sorts lexicographically in start order across seconds; two runs that
-/// start within the same second share the prefix, and their suffix order is
-/// deliberately unspecified.
+/// A run's identity: the UTC start instant as `yyyymmdd-hhmmss`, a `-`, and a
+/// suffix of two lowercase words (an adjective then a noun) that breaks
+/// same-second collisions. The timestamp prefix sorts lexicographically in
+/// start order across seconds; two runs that start within the same second
+/// share the prefix, and their suffix order is deliberately unspecified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunId(String);
 
@@ -97,13 +98,18 @@ impl RunId {
     /// of that id already exists under `runs_dir` (an occupied id is never
     /// reused or merged into). The prefix is formatted from the absolute
     /// instant in UTC, so it is independent of the machine's local zone.
-    pub fn mint(start: Timestamp, runs_dir: &Path) -> io::Result<RunId> {
-        let prefix = start.strftime("%Y%m%d%H%M%S").to_string();
+    pub fn mint(start: Timestamp, runs_dir: &Path) -> RunId {
+        let prefix = start.strftime("%Y%m%d-%H%M%S").to_string();
+        let petnames = Petnames::small();
+        let namer = petnames.namer(2, "-");
         loop {
-            let suffix = getrandom::u32().map_err(io::Error::other)? % 10_000;
-            let id = format!("{prefix}-{suffix:04}");
+            let suffix = namer
+                .iter(&mut rand::rng())
+                .next()
+                .expect("small word lists are non-empty");
+            let id = format!("{prefix}-{suffix}");
             if !runs_dir.join(&id).exists() {
-                return Ok(RunId(id));
+                return RunId(id);
             }
         }
     }
@@ -275,7 +281,7 @@ impl RunRecord {
         if !ignore.is_file() {
             fs::write(&ignore, "*\n")?;
         }
-        let id = RunId::mint(start, &runs)?;
+        let id = RunId::mint(start, &runs);
         let dir = runs.join(id.as_str());
         // Build the record in a sibling temp directory and publish it with a
         // single rename, so the run id never names a directory missing either
@@ -592,7 +598,7 @@ mod tests {
 
     /// The fixed start instant the id/UTC tests pin.
     fn start() -> Timestamp {
-        "2026-09-12T14:32:24Z".parse().unwrap()
+        "2026-09-12T14:30:22Z".parse().unwrap()
     }
 
     fn record_in(dir: &Path) -> RunRecord {
@@ -619,39 +625,50 @@ mod tests {
     // -- 2.2 run-id minting -------------------------------------------------
 
     #[test]
-    fn run_id_shape_is_timestamp_dash_decimal() {
+    fn run_id_shape_is_timestamp_dash_word_pair() {
         let tmp = tempfile::tempdir().unwrap();
-        let id = RunId::mint(start(), tmp.path()).unwrap();
+        let id = RunId::mint(start(), tmp.path());
         let s = id.as_str();
-        let suffix = s.strip_prefix("20260912143224-").expect("timestamp prefix");
-        assert_eq!(suffix.len(), 4, "{s}");
-        assert!(suffix.bytes().all(|b| b.is_ascii_digit()), "{s}");
+        let suffix = s
+            .strip_prefix("20260912-143022-")
+            .expect("timestamp prefix");
+        let mut words = suffix.split('-');
+        let adjective = words.next().expect("adjective");
+        let noun = words.next().expect("noun");
+        assert!(words.next().is_none(), "exactly two words: {s}");
+        for word in [adjective, noun] {
+            assert!(!word.is_empty(), "empty word in {s}");
+            assert!(
+                word.bytes().all(|b| b.is_ascii_lowercase()),
+                "lowercase word tokens: {s}"
+            );
+        }
     }
 
     #[test]
     fn run_id_encodes_utc_regardless_of_local_zone() {
         let tmp = tempfile::tempdir().unwrap();
-        // 21:32:24 at UTC+07:00 is 14:32:24 UTC; the prefix comes from the
+        // 21:30:22 at UTC+07:00 is 14:30:22 UTC; the prefix comes from the
         // absolute instant, so a non-UTC local zone cannot move it.
-        let ts: Timestamp = "2026-09-12T21:32:24+07:00".parse().unwrap();
-        let id = RunId::mint(ts, tmp.path()).unwrap();
-        assert!(id.as_str().starts_with("20260912143224-"), "{id}");
+        let ts: Timestamp = "2026-09-12T21:30:22+07:00".parse().unwrap();
+        let id = RunId::mint(ts, tmp.path());
+        assert!(id.as_str().starts_with("20260912-143022-"), "{id}");
     }
 
     #[test]
     fn run_ids_sort_in_start_order_across_seconds() {
         let tmp = tempfile::tempdir().unwrap();
-        let first = RunId::mint("2026-09-12T14:32:24Z".parse().unwrap(), tmp.path()).unwrap();
-        let second = RunId::mint("2026-09-12T14:32:25Z".parse().unwrap(), tmp.path()).unwrap();
+        let first = RunId::mint("2026-09-12T14:32:24Z".parse().unwrap(), tmp.path());
+        let second = RunId::mint("2026-09-12T14:32:25Z".parse().unwrap(), tmp.path());
         assert!(first.as_str() < second.as_str(), "{first} !< {second}");
     }
 
     #[test]
     fn occupied_run_id_is_not_reused() {
         let tmp = tempfile::tempdir().unwrap();
-        let first = RunId::mint(start(), tmp.path()).unwrap();
+        let first = RunId::mint(start(), tmp.path());
         fs::create_dir(tmp.path().join(first.as_str())).unwrap();
-        let second = RunId::mint(start(), tmp.path()).unwrap();
+        let second = RunId::mint(start(), tmp.path());
         assert_ne!(first.as_str(), second.as_str());
     }
 
@@ -865,7 +882,7 @@ mod tests {
     fn fully_populated() -> RunMeta {
         RunMeta {
             schema_version: SCHEMA_VERSION,
-            run_id: "20260912143224-4821".into(),
+            run_id: "20260912-143022-polite-aardvark".into(),
             script: "main.luau".into(),
             argv: vec!["ptah".into(), "run".into(), "main.luau".into()],
             invocation_dir: "/work/project".into(),
@@ -957,7 +974,7 @@ mod tests {
         assert_eq!(meta.status, RunStatus::Running);
         assert!(meta.ended_at.is_none());
         assert!(meta.exit_code.is_none());
-        assert_eq!(meta.started_at, "2026-09-12T14:32:24Z");
+        assert_eq!(meta.started_at, "2026-09-12T14:30:22Z");
     }
 
     #[test]
@@ -1106,20 +1123,20 @@ mod tests {
         // Under the invocation directory: relative to it.
         assert_eq!(
             run_start_line(
-                Path::new("/work/project/.ptah/runs/20260912143224-4821"),
+                Path::new("/work/project/.ptah/runs/20260912-143022-polite-aardvark"),
                 invocation,
                 Some(home),
             ),
-            "run record: .ptah/runs/20260912143224-4821"
+            "run record: .ptah/runs/20260912-143022-polite-aardvark"
         );
         // Outside the invocation directory but under home: `~`-collapsed.
         assert_eq!(
             run_start_line(
-                Path::new("/home/u/project/.ptah/runs/20260912143224-4821"),
+                Path::new("/home/u/project/.ptah/runs/20260912-143022-polite-aardvark"),
                 invocation,
                 Some(home),
             ),
-            "run record: ~/project/.ptah/runs/20260912143224-4821"
+            "run record: ~/project/.ptah/runs/20260912-143022-polite-aardvark"
         );
         // Outside home too: as received. Unknown home keeps the same rule.
         assert_eq!(

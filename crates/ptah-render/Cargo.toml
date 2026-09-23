@@ -11,7 +11,8 @@ ptah-core = { path = "../ptah-core" }
 jiff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-getrandom = { workspace = true }
+petname = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
