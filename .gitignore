@@ -8,3 +8,4 @@
 *.log
 .ptah/luau_packages/
 .ptah/.pesde/
+.ptah/worktree/
