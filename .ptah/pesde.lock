@@ -5,11 +5,11 @@ name = "components/ptah"
 version = "0.1.0"
 target = "luau"
 
-[graph."patextreme/ptah_libs@0.0.0-e21ec3dacaa1f4687daa13b6f8bdbe8ffdd6738b luau"]
+[graph."patextreme/ptah_libs@0.0.0-0a86b670583cf458436e3ebf669ada16bce70e9f luau"]
 direct = ["ptah_libs", { repo = "https://github.com/patextreme/ptah-libs", rev = "main" }, "standard"]
 
-[graph."patextreme/ptah_libs@0.0.0-e21ec3dacaa1f4687daa13b6f8bdbe8ffdd6738b luau".pkg_ref]
+[graph."patextreme/ptah_libs@0.0.0-0a86b670583cf458436e3ebf669ada16bce70e9f luau".pkg_ref]
 ref_ty = "git"
 repo = "https://github.com/patextreme/ptah-libs"
-tree_id = "e21ec3dacaa1f4687daa13b6f8bdbe8ffdd6738b"
+tree_id = "0a86b670583cf458436e3ebf669ada16bce70e9f"
 new_structure = true
