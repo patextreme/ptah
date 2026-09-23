@@ -118,12 +118,25 @@ s:close()
     assert!(ignore.is_file(), "no ignore file");
     assert!(std::fs::read_to_string(&ignore).unwrap().contains('*'));
 
-    // Id shape: `yyyymmddhhmmss-<digits>`, the directory name.
+    // Id shape: `yyyymmdd-hhmmss-<adjective>-<noun>`, the directory name.
     let id = dir.file_name().unwrap().to_string_lossy().into_owned();
-    let (ts, suffix) = id.split_once('-').unwrap_or_else(|| panic!("no dash: {id}"));
-    assert_eq!(ts.len(), 14, "{id}");
-    assert!(ts.bytes().all(|b| b.is_ascii_digit()), "{id}");
-    assert!(!suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()), "{id}");
+    let mut fields = id.split('-');
+    let date = fields.next().expect("date field");
+    let time = fields.next().expect("time field");
+    assert_eq!(date.len(), 8, "{id}");
+    assert!(date.bytes().all(|b| b.is_ascii_digit()), "{id}");
+    assert_eq!(time.len(), 6, "{id}");
+    assert!(time.bytes().all(|b| b.is_ascii_digit()), "{id}");
+    let adjective = fields.next().expect("adjective");
+    let noun = fields.next().expect("noun");
+    assert!(fields.next().is_none(), "exactly two words: {id}");
+    for word in [adjective, noun] {
+        assert!(!word.is_empty(), "empty word in {id}");
+        assert!(
+            word.bytes().all(|b| b.is_ascii_lowercase()),
+            "lowercase word tokens: {id}"
+        );
+    }
 
     // The record is the superset of the terminal: the log carries the
     // rendered stream even though the run's own verbosity governs it.

@@ -14,7 +14,7 @@ is the decimal suffix this change deletes. See proposal.md — Why.
 
 **Goals:**
 
-- A human-grippable id (`20260912-143022-polite-cymbol`) that keeps every
+- A human-grippable id (`20260912-143022-polite-aardvark`) that keeps every
   existing guarantee: lexicographic sort = start order, UTC encoding,
   occupied-id re-mint, same-second relative order unspecified.
 - Word quality for free: adjective-noun pairs whose entire cross-product is
@@ -39,18 +39,23 @@ is the decimal suffix this change deletes. See proposal.md — Why.
   updates; rejected. (c) Hand-curated lists — we would own the adjective×noun
   cross-product safety review that petname 2.0 famously had to redo; rejected
   unless house tone ever matters more than the review burden.
-  `generate(rng, 2, "-")` yields exactly adjective-noun (verified in petname's
-  source: `words = 2` maps to `Adjective` then `Noun`). The `small()` list is
+  `namer(2, "-")` yields exactly adjective-noun (verified in petname 3.2.0's
+  source: `words = 2` maps to `Adjective` then `Noun`; generation goes through
+  `Namer::iter(rng)` or `Namer::generate_into(buf, rng)`). The `small()` list is
   449×449 ≈ 201k combinations — 20× today's collision space; worst-case id is
   33 chars (`20260912-143022-absolute-aardvark`), all lowercase ASCII.
 
-- **Dependency shape: `petname = { version = "3.2", default-features = false,
-  features = ["default-rng", "default-words"] }` in the workspace table.**
+- **Dependency shape: `petname = { version = "3.2", default-features =
+  false, features = ["default-rng", "default-words"] }` plus a direct
+  `rand = "0.10"` in the workspace table.**
   Default features off drops petname's own CLI (clap); `default-words` keeps
-  the word-embedding macro, `default-rng` provides `rand::rng()`. Net-new
-  packages: `petname` + `petname-macros` only — `rand 0.10` is already
-  resolved in the lock via quinn-proto, so no RNG version fork. Declared in
-  the workspace manifest with a justification comment, house-style.
+  the word-embedding macro, `default-rng` enables rand's `thread_rng` feature.
+  `rand` must also be a direct dependency of `ptah-render`: petname does not
+  re-export it, the mint constructs the RNG itself, and lock presence alone
+  does not put a crate in the extern prelude. Net-new packages: `petname` +
+  `petname-macros` only — `rand 0.10` is already resolved in the lock via
+  quinn-proto, so no RNG version fork. Declared in the workspace manifest with
+  a justification comment, house-style.
 
 - **`getrandom` leaves the workspace dependency table.** Its sole caller was
   the decimal suffix; with thread_rng the mint has no fallible randomness

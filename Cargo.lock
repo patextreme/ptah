@@ -3005,6 +3005,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "petname"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfb4653a82ec48e6d324c788597aadf46449bfc7b8e76d2a03b513a944325c88"
+dependencies = [
+ "petname-macros",
+ "rand",
+]
+
+[[package]]
+name = "petname-macros"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78c406fb544296f598ccf69b82bcf1b12440c8f23ebf75946105f86304f16eb2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3257,9 +3278,10 @@ dependencies = [
 name = "ptah-render"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.4.3",
  "jiff",
+ "petname",
  "ptah-core",
+ "rand",
  "serde",
  "serde_json",
  "tempfile",

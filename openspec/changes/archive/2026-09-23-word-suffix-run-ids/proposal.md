@@ -5,13 +5,13 @@
 Run record directories under `.ptah/runs/` are named with a bare decimal
 suffix (`20260912143224-4821`) — opaque and easy to confuse at a glance when
 scanning or discussing runs. A Docker/zellij-style word pair gives each run a
-human-grippable handle (`20260912-143022-polite-cymbol`) while preserving the
+human-grippable handle (`20260912-143022-polite-aardvark`) while preserving the
 properties the id exists for: sortability and collision-freedom.
 
 ## What Changes
 
 - Run ids change from `yyyymmddhhmmss-<4 decimal digits>` to
-  `yyyymmdd-hhmmss-<adjective>-<noun>` (e.g. `20260912-143022-polite-cymbol`).
+  `yyyymmdd-hhmmss-<adjective>-<noun>` (e.g. `20260912-143022-polite-aardvark`).
   **BREAKING** for any consumer that assumed the old id shape; the id remains
   an opaque directory name for everything inside ptah.
 - The timestamp prefix gains a hyphen between date and time; it stays UTC and
@@ -43,13 +43,19 @@ properties the id exists for: sortability and collision-freedom.
 
 ## Impact
 
-- `crates/ptah-render/src/record.rs` — `RunId::mint` rewrite and the §2.2
-  unit tests that pin the id shape.
+- `crates/ptah-render/src/record.rs` — `RunId::mint` rewrite, the §2.2
+  unit tests that pin the id shape, and the stale old-format id literals in
+  the run-start-line / `run.json` fixtures.
+- `crates/ptah-cli/tests/record.rs` — the `run_creates_a_log_and_run_json`
+  id-shape assertion, which currently pins the old `yyyymmddhhmmss-<digits>`
+  form.
 - Root `Cargo.toml` and `crates/ptah-render/Cargo.toml` — add `petname`
   (`default-features = false`, features `default-rng` + `default-words`;
-  petname's own CLI/clap surface stays out), remove `getrandom`. `rand 0.10`
-  is already in the lock via quinn-proto, so petname adds only itself and its
-  word-embedding proc-macro.
+  petname's own CLI/clap surface stays out), add `rand 0.10` as
+  `ptah-render`'s direct thread-RNG dependency (petname does not re-export
+  `rand`, and lock presence alone does not put it in the extern prelude;
+  the version is already resolved via quinn-proto, so no fork), and remove
+  `getrandom`. Net-new packages: `petname` + its word-embedding proc-macro.
 - `openspec/specs/run-record/spec.md` — id-shape requirement and scenarios.
 - `README.md` — run-record section and the sample run-start line.
 - `CONTEXT.md` — untouched: "sortable, collision-free identifier" is

@@ -172,11 +172,11 @@ local wall-clock timestamp and the session attribution:
 
 ## Run records
 
-Every `ptah run` mints a run id — the UTC start instant as `yyyymmddhhmmss`
-plus a short random suffix, `20260912143224-4821`, so a directory listing
-sorts chronologically (runs that start in the same second tie on the prefix
-and their suffix order is unspecified) — and writes a **run record** under
-the project's `.ptah/runs/<run id>/`:
+Every `ptah run` mints a run id — the UTC start instant as `yyyymmdd-hhmmss`
+followed by an adjective-noun word suffix, `20260912-143022-polite-aardvark`,
+so a directory listing sorts chronologically (runs that start in the same
+second tie on the prefix and their suffix order is unspecified) — and writes
+a **run record** under the project's `.ptah/runs/<run id>/`:
 
 | Path | Contents |
 |---|---|
@@ -195,7 +195,7 @@ A run-start line names the record at default verbosity, so you need not
 look for it:
 
 ```
-2026-09-12 14:32:24 [ptah] run record: .ptah/runs/20260912143224-4821
+2026-09-12 14:32:24 [ptah] run record: .ptah/runs/20260912-143022-polite-aardvark
 ```
 
 ### `log` is the rendered stream, not a stdout capture
