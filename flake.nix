@@ -23,7 +23,7 @@
     # paired with `nix flake update ptah-libs` — the pin-guard test in
     # tests/ptah_libs.rs asserts the two pins agree.
     ptah-libs = {
-      url = "github:patextreme/ptah-libs/0a282f942af9da6c8b1387c2aebfff3687ee4c11";
+      url = "github:patextreme/ptah-libs/e65ecbebd43684d3b213e0a873bef18c855f88ec";
       flake = false;
     };
   };
