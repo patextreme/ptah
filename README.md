@@ -369,8 +369,8 @@ env = { PI_NO_BELL = "1" }
 `pi-acp` resolves via `PATH` from this repo's dev shell (`nix develop`),
 which carries a patched build as a flake output:
 
-- `packages.<system>.pi-acp` — `buildNpmPackage` of pi-acp 0.0.33 pinned at
-  git rev `d1cffc0`, patched in-repo (`nix/packages/pi-acp/`): upstream
+- `packages.<system>.pi-acp` — `buildNpmPackage` of pi-acp 0.0.34 pinned at
+  git rev `b0581c9`, patched in-repo (`nix/packages/pi-acp/`): upstream
   pi-acp accepts ACP `session/new { mcpServers }` but never wires
   them into pi, so every `resultSchema` script would silently degrade to
   `result = nil`; the patch materializes stdio servers into a per-session
@@ -392,6 +392,8 @@ npm:pi-mcp-adapter` (verified with 2.29.0; check with `pi --help | grep
 gracefully: without support (or for ACP http/sse servers) it warns —
 "MCP: dropped N MCP server(s) …" — and drops them, and every turn
 completes with `result = nil`, exactly ptah's documented degradation path.
+pi-acp 0.0.34 additionally requires pi v0.81.0+ (model-specific thinking
+levels); older pi makes `session/new` fail outright rather than degrade.
 Upstreaming the patch is out of scope; bumping the pinned rev requires
 rebasing it by hand — see `nix/packages/pi-acp/README.md`.
 
@@ -1059,7 +1061,7 @@ change.
   `MOCK_CONFIG_UPDATE`, `MOCK_CONFIG_ECHO`, …).
 - `nix flake check` runs the entire suite in the sandbox.
 - `nix/packages/pi-acp/` — the patched pi-acp adapter as a self-contained
-  package directory: `default.nix` (pinned rev, v0.0.33), `mcp-config.patch`,
+  package directory: `default.nix` (pinned rev, v0.0.34), `mcp-config.patch`,
   and `README.md` with the patch rationale and rebase workflow (see "The
   `pi` agent" above). The patch is developed in a gitignored `.work/pi-acp`
   clone of the pinned rev and exported with `git diff`.

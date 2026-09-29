@@ -1,5 +1,5 @@
 diff --git a/src/acp/agent.ts b/src/acp/agent.ts
-index 381b04d..4290f4c 100644
+index f3ce031..9ca3819 100644
 --- a/src/acp/agent.ts
 +++ b/src/acp/agent.ts
 @@ -44,6 +44,7 @@ import { promptToPiMessage } from './translate/prompt.js'
@@ -10,7 +10,7 @@ index 381b04d..4290f4c 100644
  import { maybeAuthRequiredError } from './auth-required.js'
  import { isAbsolute } from 'node:path'
  import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
-@@ -197,11 +198,14 @@ export class PiAcpAgent implements ACPAgent {
+@@ -196,11 +197,14 @@ export class PiAcpAgent implements ACPAgent {
        const cwd = opts?.cwd ?? stored.cwd
  
        let proc: PiRpcProcess
@@ -26,7 +26,7 @@ index 381b04d..4290f4c 100644
          })
        } catch (e: any) {
          if (e?.name === 'PiRpcSpawnError') {
-@@ -279,13 +283,18 @@ export class PiAcpAgent implements ACPAgent {
+@@ -278,13 +282,18 @@ export class PiAcpAgent implements ACPAgent {
      const fileCommands = loadSlashCommands(params.cwd)
      const enableSkillCommands = getEnableSkillCommands(params.cwd)
  
@@ -47,7 +47,7 @@ index 381b04d..4290f4c 100644
      })
  
      // Fetch state + models once (parallel) to reduce startup latency.
-@@ -356,7 +365,7 @@ export class PiAcpAgent implements ACPAgent {
+@@ -360,7 +369,7 @@ export class PiAcpAgent implements ACPAgent {
  
      // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
      // the "New version available" notice (if any) since it's high-signal and actionable.
@@ -56,7 +56,7 @@ index 381b04d..4290f4c 100644
        ? updateNotice
          ? updateNotice + '\n'
          : ''
-@@ -366,6 +375,12 @@ export class PiAcpAgent implements ACPAgent {
+@@ -370,6 +379,12 @@ export class PiAcpAgent implements ACPAgent {
            updateNotice
          })
  
@@ -268,10 +268,10 @@ index 0000000..011d168
 +  return statSync(path).mode & 0o777
 +}
 diff --git a/src/acp/session.ts b/src/acp/session.ts
-index d2fae68..45c511f 100644
+index 1c97b24..7819b2c 100644
 --- a/src/acp/session.ts
 +++ b/src/acp/session.ts
-@@ -34,6 +34,8 @@ type SessionCreateParams = {
+@@ -40,6 +40,8 @@ type SessionCreateParams = {
    conn: AgentSideConnection
    fileCommands?: import('./slash-commands.js').FileSlashCommand[]
    piCommand?: string
@@ -280,7 +280,7 @@ index d2fae68..45c511f 100644
  }
  
  export type StopReason = 'end_turn' | 'cancelled' | 'error'
-@@ -191,7 +193,8 @@ export class SessionManager {
+@@ -212,7 +214,8 @@ export class SessionManager {
      try {
        proc = await PiRpcProcess.spawn({
          cwd: params.cwd,
@@ -291,18 +291,18 @@ index d2fae68..45c511f 100644
      } catch (e) {
        if (e instanceof PiRpcSpawnError) {
 diff --git a/src/pi-rpc/process.ts b/src/pi-rpc/process.ts
-index 92f7959..4635bb1 100644
+index 160cc90..9f8ff30 100644
 --- a/src/pi-rpc/process.ts
 +++ b/src/pi-rpc/process.ts
-@@ -1,6 +1,7 @@
- import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
  import * as readline from 'node:readline'
+ import crossSpawn from 'cross-spawn'
  import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 +import { removeMcpConfigFile } from '../acp/mcp-config.js'
  
  export class PiRpcSpawnError extends Error {
    /** Underlying spawn error code, e.g. ENOENT, EACCES */
-@@ -74,6 +75,11 @@ type SpawnParams = {
+@@ -103,6 +104,11 @@ type SpawnParams = {
    piCommand?: string
    /** If set, pi will persist the session to this exact file (via `--session <path>`). */
    sessionPath?: string
@@ -314,7 +314,7 @@ index 92f7959..4635bb1 100644
  }
  
  export class PiRpcProcess {
-@@ -81,9 +87,11 @@ export class PiRpcProcess {
+@@ -110,9 +116,11 @@ export class PiRpcProcess {
    private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
    private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
    private readonly preludeLines: string[] = []
@@ -327,15 +327,15 @@ index 92f7959..4635bb1 100644
  
      const rl = readline.createInterface({ input: child.stdout })
      rl.on('line', line => {
-@@ -136,6 +144,7 @@ export class PiRpcProcess {
+@@ -161,6 +169,7 @@ export class PiRpcProcess {
      // (e.g. MCP extensions, prompt templates for workflows).
      const args = ['--mode', 'rpc', '--no-themes']
      if (params.sessionPath) args.push('--session', params.sessionPath)
 +    if (params.mcpConfigPath) args.push('--mcp-config', params.mcpConfigPath)
  
-     const child = spawn(cmd, args, {
-       cwd: params.cwd,
-@@ -166,6 +175,7 @@ export class PiRpcProcess {
+     // Windows cmd launchers need shell escaping; direct executables use native argv.
+     const start = shouldUseShellForPiCommand(cmd) ? crossSpawn : spawn
+@@ -192,6 +201,7 @@ export class PiRpcProcess {
        })
      } catch (e: any) {
        const code = typeof e?.code === 'string' ? e.code : undefined
@@ -343,7 +343,7 @@ index 92f7959..4635bb1 100644
        if (code === 'ENOENT') {
          throw new PiRpcSpawnError(
            `Could not start pi: executable not found (command: ${cmd}). Pi needs to be installed before it can run in ACP clients. Install it via \`npm install -g @earendil-works/pi-coding-agent\` or ensure \`pi\` is on your PATH. Then try again.`,
-@@ -184,7 +194,7 @@ export class PiRpcProcess {
+@@ -210,7 +220,7 @@ export class PiRpcProcess {
        // leave stderr untouched; ACP clients may capture it.
      })
  
@@ -352,7 +352,7 @@ index 92f7959..4635bb1 100644
  
      // Best-effort handshake.
      // Important: pi may emit a get_state response pointing at a sessionFile in a directory
-@@ -213,12 +223,18 @@ export class PiRpcProcess {
+@@ -239,12 +249,18 @@ export class PiRpcProcess {
    }
  
    dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
@@ -592,10 +592,10 @@ index 0000000..b7eda77
 +})
 diff --git a/test/helpers/fake-pi.mjs b/test/helpers/fake-pi.mjs
 new file mode 100755
-index 0000000..15bd53a
+index 0000000..b83b205
 --- /dev/null
 +++ b/test/helpers/fake-pi.mjs
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,86 @@
 +#!/usr/bin/env node
 +// Fake `pi` executable for tests: records its argv, answers `--help`, and
 +// speaks the minimal pi RPC subset pi-acp needs during session/new.
@@ -658,6 +658,9 @@ index 0000000..15bd53a
 +      break
 +    case 'get_available_models':
 +      respond(msg, { models: [{ provider: 'test', id: 'model', name: 'model' }] })
++      break
++    case 'get_available_thinking_levels':
++      respond(msg, { levels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] })
 +      break
 +    case 'get_commands':
 +      respond(msg, { commands: [] })
@@ -890,7 +893,7 @@ index 0000000..20b76b6
 +  })
 +})
 diff --git a/test/unit/session-restore.test.ts b/test/unit/session-restore.test.ts
-index 46abe33..e80e913 100644
+index 3762067..a08a93a 100644
 --- a/test/unit/session-restore.test.ts
 +++ b/test/unit/session-restore.test.ts
 @@ -80,7 +80,8 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
@@ -903,7 +906,7 @@ index 46abe33..e80e913 100644
        }
      ])
      assert.deepEqual(promptCalls, [{ message: 'hello again', images: [] }])
-@@ -173,7 +174,8 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery
+@@ -177,7 +178,8 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery
        {
          cwd: '/tmp/fallback-project',
          sessionPath: sessionFile,

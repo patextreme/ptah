@@ -11,19 +11,19 @@
   perSystem = {pkgs, ...}: {
     packages.pi-acp = pkgs.buildNpmPackage {
       pname = "pi-acp";
-      version = "0.0.33";
+      version = "0.0.34";
 
       src = pkgs.fetchFromGitHub {
         owner = "svkozak";
         repo = "pi-acp";
-        rev = "d1cffc047ab37a096ee70ca39cfc1de463db8d12";
-        hash = "sha256-y8QE91ZbRxzoaV8ITw95OqUEpsxkTI9eicygEF1GUFc=";
+        rev = "b0581c9c1d675e634234674484247008b03d69b4";
+        hash = "sha256-QRwxOtTZOY+Np3PkAoy2o2PrUzEqjItM/372sCPlSMo=";
       };
 
       patches = [./mcp-config.patch];
 
       nodejs = pkgs.nodejs_22;
-      npmDepsHash = "sha256-/fX79XucKojL/6gZbK5eizEfrXso8rlTgiHfJffmDuY=";
+      npmDepsHash = "sha256-BvLNtFfp1cMVjzWcMRSdhTqiJrTfbFoUbWkkPW9200o=";
       npmBuild = "npm run build";
 
       meta = {
