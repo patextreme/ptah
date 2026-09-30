@@ -1,5 +1,5 @@
 diff --git a/src/acp/agent.ts b/src/acp/agent.ts
-index f3ce031..9ca3819 100644
+index f3ce031..38fdbe9 100644
 --- a/src/acp/agent.ts
 +++ b/src/acp/agent.ts
 @@ -44,6 +44,7 @@ import { promptToPiMessage } from './translate/prompt.js'
@@ -22,17 +22,18 @@ index f3ce031..9ca3819 100644
            sessionPath: stored.sessionFile,
 -          piCommand: process.env.PI_ACP_PI_COMMAND
 +          piCommand: process.env.PI_ACP_PI_COMMAND,
-+          mcpConfigPath: mcp.configPath ?? undefined
++          mcp: mcp.delivery ?? undefined
          })
        } catch (e: any) {
          if (e?.name === 'PiRpcSpawnError') {
-@@ -278,13 +282,18 @@ export class PiAcpAgent implements ACPAgent {
+@@ -278,13 +282,19 @@ export class PiAcpAgent implements ACPAgent {
      const fileCommands = loadSlashCommands(params.cwd)
      const enableSkillCommands = getEnableSkillCommands(params.cwd)
  
 -    // Pi doesn't support mcpServers, but we accept and store.
-+    // Materialize ACP-provided stdio MCP servers into a per-session pi MCP
-+    // config (acp/mcp-config.ts). Unsupported servers are warned about and
++    // Materialize ACP-provided stdio MCP servers for pi (acp/mcp-config.ts):
++    // built-in MCP on pi >= 0.99, the pi-mcp-adapter `--mcp-config` flag when
++    // that extension owns MCP. Unsupported servers are warned about and
 +    // dropped — never a spawn failure.
 +    const mcp = prepareSessionMcpConfig(params.mcpServers, { piCommand: process.env.PI_ACP_PI_COMMAND })
 +
@@ -43,11 +44,11 @@ index f3ce031..9ca3819 100644
        fileCommands,
 -      piCommand: process.env.PI_ACP_PI_COMMAND
 +      piCommand: process.env.PI_ACP_PI_COMMAND,
-+      mcpConfigPath: mcp.configPath
++      mcp: mcp.delivery ?? undefined
      })
  
      // Fetch state + models once (parallel) to reduce startup latency.
-@@ -360,7 +369,7 @@ export class PiAcpAgent implements ACPAgent {
+@@ -360,7 +370,7 @@ export class PiAcpAgent implements ACPAgent {
  
      // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
      // the "New version available" notice (if any) since it's high-signal and actionable.
@@ -56,7 +57,7 @@ index f3ce031..9ca3819 100644
        ? updateNotice
          ? updateNotice + '\n'
          : ''
-@@ -370,6 +379,12 @@ export class PiAcpAgent implements ACPAgent {
+@@ -370,6 +380,12 @@ export class PiAcpAgent implements ACPAgent {
            updateNotice
          })
  
@@ -71,10 +72,10 @@ index f3ce031..9ca3819 100644
  
 diff --git a/src/acp/mcp-config.ts b/src/acp/mcp-config.ts
 new file mode 100644
-index 0000000..011d168
+index 0000000..119dd3d
 --- /dev/null
 +++ b/src/acp/mcp-config.ts
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,291 @@
 +import { spawnSync } from 'node:child_process'
 +import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 +import { tmpdir } from 'node:os'
@@ -86,37 +87,49 @@ index 0000000..011d168
 + * Wiring for ACP-provided MCP servers.
 + *
 + * ACP clients (Zed, ptah, ...) may pass `mcpServers` in `session/new` /
-+ * `session/load`. pi has no native MCP support, but the pi-mcp-adapter
-+ * extension registers a `--mcp-config <path>` CLI flag that loads extra MCP
-+ * config layers. We materialize the stdio servers into a per-session
-+ * ephemeral config file (mode 0600 — it can carry capability tokens such as
-+ * socket paths) and hand its path to the pi process. The file lives in its
-+ * own mkdtemp() directory and is removed when the pi process is disposed.
++ * `session/load`. pi consumes them in one of two ways, selected by a cached
++ * `pi --help` probe (acp/mcp-config.ts:detectMcpSupport):
 + *
-+ * Graceful degradation: when the target pi lacks `--mcp-config` support
-+ * (pi-mcp-adapter not installed) or a server uses a non-stdio transport, the
-+ * servers are warned about and dropped — never a spawn failure.
++ * - **native** (pi >= 0.99 built-in MCP): pi-acp writes the stdio servers to a
++ *   per-session config file and generates a tiny extension that registers them
++ *   with `pi.registerMcpServer`. The extension is loaded with `-e <file>` and
++ *   finds the config through `PI_ACP_MCP_CONFIG`.
++ * - **adapter** (pi-mcp-adapter installed): the extension's `--mcp-config
++ *   <path>` flag loads the same per-session file. Preferred when present,
++ *   because an installed adapter replaces pi's built-in MCP.
++ *
++ * Either way the config lives in its own mkdtemp() directory (mode 0600 — it
++ * can carry capability tokens such as socket paths) and is removed when the pi
++ * process is disposed.
++ *
++ * Graceful degradation: when the target pi supports neither mechanism, or a
++ * server uses a non-stdio transport, the servers are warned about and dropped —
++ * never a spawn failure. (A throwing `-e` extension would abort pi, so support
++ * must be probed before the flag is passed.)
 + */
 +
++/** How this session's stdio MCP servers reach pi. */
++export type McpDelivery =
++  | { kind: 'adapter'; configPath: string }
++  | { kind: 'native'; configPath: string; extensionPath: string }
++
 +export type PreparedMcpConfig = {
-+  /**
-+   * Absolute path to the per-session MCP config file, or null when no config
-+   * was needed (no stdio servers provided, or support missing and servers dropped).
-+   */
-+  configPath: string | null
++  /** Delivery for `PiRpcProcess.spawn`, or null when nothing is delivered. */
++  delivery: McpDelivery | null
 +  /** Human-readable warnings for dropped servers, surfaced via startup notices. */
 +  warnings: string[]
 +}
 +
-+/** pi-mcp-adapter entry for one stdio server. */
-+type PiMcpServerEntry = {
++/** One `mcpServers` entry: adapter (`directTools`) or native (`exposure`). */
++export type PiMcpServerEntry = {
 +  command: string
 +  args: string[]
 +  env: Record<string, string>
-+  directTools: true
++  directTools?: true
++  exposure?: 'direct'
 +}
 +
-+type PiMcpConfigFile = {
++export type PiMcpConfigFile = {
 +  mcpServers: Record<string, PiMcpServerEntry>
 +}
 +
@@ -143,23 +156,26 @@ index 0000000..011d168
 +  return { stdio, droppedNonStdio }
 +}
 +
++function toEnvRecord(server: McpServerStdio): Record<string, string> {
++  const env: Record<string, string> = {}
++  for (const v of server.env ?? []) env[v.name] = v.value
++  return env
++}
++
 +/**
 + * Map ACP stdio servers to pi-mcp-adapter entries. Tools are registered as
 + * direct first-class pi tools (`directTools: true`): an ACP client offering a
 + * server is explicitly telling the agent it matters, so hiding it behind the
 + * adapter's `mcp` proxy search would invert that intent.
 + */
-+export function toMcpConfigFile(stdio: McpServerStdio[]): PiMcpConfigFile {
++export function toAdapterMcpConfigFile(stdio: McpServerStdio[]): PiMcpConfigFile {
 +  const mcpServers: Record<string, PiMcpServerEntry> = {}
 +
 +  for (const server of stdio) {
-+    const env: Record<string, string> = {}
-+    for (const v of server.env ?? []) env[v.name] = v.value
-+
 +    mcpServers[server.name] = {
 +      command: server.command,
 +      args: [...(server.args ?? [])],
-+      env,
++      env: toEnvRecord(server),
 +      directTools: true
 +    }
 +  }
@@ -168,11 +184,34 @@ index 0000000..011d168
 +}
 +
 +/**
-+ * Write the config into its own fresh temp directory and return the file path.
-+ * Mode 0600: the env block can carry capability tokens (e.g. socket paths).
++ * Map ACP stdio servers to pi's built-in `mcp.json` entries with
++ * `exposure: 'direct'` — the native equivalent of the adapter's
++ * `directTools: true`, so the server's tools are declared to the model.
 + */
-+export function writeMcpConfigFile(config: PiMcpConfigFile): string {
-+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-'))
++export function toNativeMcpConfigFile(stdio: McpServerStdio[]): PiMcpConfigFile {
++  const mcpServers: Record<string, PiMcpServerEntry> = {}
++
++  for (const server of stdio) {
++    mcpServers[server.name] = {
++      command: server.command,
++      args: [...(server.args ?? [])],
++      env: toEnvRecord(server),
++      exposure: 'direct'
++    }
++  }
++
++  return { mcpServers }
++}
++
++function createSessionTempDir(): string {
++  return mkdtempSync(join(tmpdir(), 'pi-acp-mcp-'))
++}
++
++/**
++ * Write the config into `dir` (a fresh temp dir by default) and return the file
++ * path. Mode 0600: the env block can carry capability tokens (e.g. socket paths).
++ */
++export function writeMcpConfigFile(config: PiMcpConfigFile, dir: string = createSessionTempDir()): string {
 +  const file = join(dir, 'mcp.json')
 +  writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
 +  return file
@@ -192,52 +231,104 @@ index 0000000..011d168
 +  return JSON.parse(readFileSync(path, 'utf-8')) as PiMcpConfigFile
 +}
 +
-+// --- capability probe -------------------------------------------------------
++// --- native registration extension ------------------------------------------
++
++export const MCP_REGISTER_EXTENSION_FILENAME = 'register-mcp-extension.mjs'
 +
 +/**
-+ * `--mcp-config` is registered by the pi-mcp-adapter extension, not by pi
-+ * core, so its presence must be probed. Cached per pi-acp process: probed
-+ * lazily only when stdio MCP servers are actually offered.
++ * Generated per session and loaded with `-e`: registers the servers named by
++ * `PI_ACP_MCP_CONFIG` with pi's built-in MCP. Written as source text rather
++ * than a build-emitted asset so the carried patch stays self-contained and
++ * behaves identically from source (tsx) and from the bundled dist.
 + */
-+let mcpConfigSupportCache: boolean | null = null
++export const MCP_REGISTER_EXTENSION_SOURCE = `import { readFileSync } from 'node:fs'
++
++// Generated per session by pi-acp: register ACP-provided MCP servers with
++// pi's built-in MCP support. No-op when there is nothing to register.
++export default function (pi) {
++  const path = process.env.PI_ACP_MCP_CONFIG
++  if (!path) return
++  if (typeof pi.registerMcpServer !== 'function') {
++    console.error('[pi-acp] this pi cannot register MCP servers (built-in MCP requires pi >= 0.99).')
++    return
++  }
++  let servers
++  try {
++    servers = JSON.parse(readFileSync(path, 'utf-8')).mcpServers ?? {}
++  } catch (e) {
++    console.error('[pi-acp] failed to read MCP config ' + path + ': ' + (e && e.message ? e.message : e))
++    return
++  }
++  for (const [name, config] of Object.entries(servers)) {
++    try {
++      pi.registerMcpServer(name, { ...config, exposure: 'direct' })
++    } catch (e) {
++      console.error('[pi-acp] failed to register MCP server ' + name + ': ' + (e && e.message ? e.message : e))
++    }
++  }
++}
++`
++
++/** Write the registration extension into `dir` and return its path. */
++export function writeMcpRegisterExtension(dir: string): string {
++  const file = join(dir, MCP_REGISTER_EXTENSION_FILENAME)
++  writeFileSync(file, MCP_REGISTER_EXTENSION_SOURCE, { mode: 0o600 })
++  return file
++}
++
++// --- capability probe -------------------------------------------------------
++
++export type McpSupport = 'adapter' | 'native' | 'none'
++
++/**
++ * Which mechanism the target pi understands. Probed lazily (only when stdio
++ * MCP servers are actually offered) and cached per pi-acp process: a throwing
++ * `-e` extension aborts pi, so native delivery must be confirmed first.
++ */
++let mcpSupportCache: McpSupport | null = null
 +
 +/** Reset the per-process probe cache (test helper). */
 +export function resetMcpConfigSupportCacheForTests(): void {
-+  mcpConfigSupportCache = null
++  mcpSupportCache = null
 +}
 +
 +/**
-+ * Probe whether the target pi understands `--mcp-config` by scanning its
-+ * `--help` output. Returns false when pi is missing or the flag is absent.
++ * Probe the target pi's `--help`:
++ * - `--mcp-config` present → `adapter` (pi-mcp-adapter owns MCP; prefer it so
++ *   the adapter is not bypassed);
++ * - else `pi mcp` subcommand → `native` (pi >= 0.99 built-in MCP);
++ * - else → `none` (warn and drop).
 + */
-+export function piSupportsMcpConfig(piCommand?: string): boolean {
-+  if (mcpConfigSupportCache !== null) return mcpConfigSupportCache
++export function detectMcpSupport(piCommand?: string): McpSupport {
++  if (mcpSupportCache !== null) return mcpSupportCache
 +
 +  try {
 +    const res = spawnSync(getPiCommand(piCommand), ['--help'], { encoding: 'utf-8', timeout: 10_000 })
 +    const text = `${res.stdout ?? ''}\n${res.stderr ?? ''}`
-+    mcpConfigSupportCache = res.status === 0 && text.includes('--mcp-config')
++    if (res.status === 0 && text.includes('--mcp-config')) mcpSupportCache = 'adapter'
++    else if (res.status === 0 && /^\s*pi mcp(\s|$)/m.test(text)) mcpSupportCache = 'native'
++    else mcpSupportCache = 'none'
 +  } catch {
-+    mcpConfigSupportCache = false
++    mcpSupportCache = 'none'
 +  }
 +
-+  return mcpConfigSupportCache
++  return mcpSupportCache
 +}
 +
 +// --- session-level preparation ----------------------------------------------
 +
 +/**
-+ * Prepare the per-session MCP config from ACP-provided servers: filter to
-+ * stdio, probe support, write the ephemeral file. Callers pass `configPath`
-+ * to `PiRpcProcess.spawn` and surface `warnings` to the user; the file is
-+ * removed when the pi process is disposed.
++ * Prepare the per-session MCP delivery from ACP-provided servers: filter to
++ * stdio, probe support, write the ephemeral file(s). Callers pass `delivery`
++ * to `PiRpcProcess.spawn` and surface `warnings` to the user; files are removed
++ * when the pi process is disposed.
 + */
 +export function prepareSessionMcpConfig(
 +  servers: McpServer[] | undefined | null,
 +  opts: { piCommand?: string }
 +): PreparedMcpConfig {
 +  const all = servers ?? []
-+  if (all.length === 0) return { configPath: null, warnings: [] }
++  if (all.length === 0) return { delivery: null, warnings: [] }
 +
 +  const { stdio, droppedNonStdio } = filterStdioMcpServers(all)
 +  const warnings: string[] = []
@@ -249,18 +340,27 @@ index 0000000..011d168
 +    )
 +  }
 +
-+  if (stdio.length === 0) return { configPath: null, warnings }
++  if (stdio.length === 0) return { delivery: null, warnings }
 +
-+  if (!piSupportsMcpConfig(opts.piCommand)) {
-+    warnings.push(
-+      `MCP: dropped ${stdio.length} MCP server(s) (${stdio.map(s => s.name).join(', ')}): ` +
-+        `this pi does not support --mcp-config. ` +
-+        `Install the pi MCP adapter with: pi install npm:pi-mcp-adapter`
-+    )
-+    return { configPath: null, warnings }
++  const support = detectMcpSupport(opts.piCommand)
++
++  if (support === 'adapter') {
++    return { delivery: { kind: 'adapter', configPath: writeMcpConfigFile(toAdapterMcpConfigFile(stdio)) }, warnings }
 +  }
 +
-+  return { configPath: writeMcpConfigFile(toMcpConfigFile(stdio)), warnings }
++  if (support === 'native') {
++    const dir = createSessionTempDir()
++    const configPath = writeMcpConfigFile(toNativeMcpConfigFile(stdio), dir)
++    const extensionPath = writeMcpRegisterExtension(dir)
++    return { delivery: { kind: 'native', configPath, extensionPath }, warnings }
++  }
++
++  warnings.push(
++    `MCP: dropped ${stdio.length} MCP server(s) (${stdio.map(s => s.name).join(', ')}): ` +
++      `this pi has no MCP support (needs built-in MCP from pi >= 0.99, ` +
++      `or the pi MCP adapter: pi install npm:pi-mcp-adapter).`
++  )
++  return { delivery: null, warnings }
 +}
 +
 +/** Exposed for tests: assert the config file is written with owner-only permissions. */
@@ -268,53 +368,62 @@ index 0000000..011d168
 +  return statSync(path).mode & 0o777
 +}
 diff --git a/src/acp/session.ts b/src/acp/session.ts
-index 1c97b24..7819b2c 100644
+index 1c97b24..c5b3a6e 100644
 --- a/src/acp/session.ts
 +++ b/src/acp/session.ts
-@@ -40,6 +40,8 @@ type SessionCreateParams = {
+@@ -19,6 +19,7 @@ import {
+   type PiSessionStats
+ } from '../pi-rpc/process.js'
+ import { maybeAuthRequiredError } from './auth-required.js'
++import type { McpDelivery } from './mcp-config.js'
+ import { SessionStore } from './session-store.js'
+ import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
+ import {
+@@ -40,6 +41,8 @@ type SessionCreateParams = {
    conn: AgentSideConnection
    fileCommands?: import('./slash-commands.js').FileSlashCommand[]
    piCommand?: string
-+  /** Per-session MCP config file (see ./mcp-config.ts); passed to the pi process. */
-+  mcpConfigPath?: string | null
++  /** Per-session MCP delivery (see ./mcp-config.ts); passed to the pi process. */
++  mcp?: McpDelivery
  }
  
  export type StopReason = 'end_turn' | 'cancelled' | 'error'
-@@ -212,7 +214,8 @@ export class SessionManager {
+@@ -212,7 +215,8 @@ export class SessionManager {
      try {
        proc = await PiRpcProcess.spawn({
          cwd: params.cwd,
 -        piCommand: params.piCommand
 +        piCommand: params.piCommand,
-+        mcpConfigPath: params.mcpConfigPath ?? undefined
++        mcp: params.mcp
        })
      } catch (e) {
        if (e instanceof PiRpcSpawnError) {
 diff --git a/src/pi-rpc/process.ts b/src/pi-rpc/process.ts
-index 160cc90..9f8ff30 100644
+index 160cc90..1927362 100644
 --- a/src/pi-rpc/process.ts
 +++ b/src/pi-rpc/process.ts
 @@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
  import * as readline from 'node:readline'
  import crossSpawn from 'cross-spawn'
  import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
-+import { removeMcpConfigFile } from '../acp/mcp-config.js'
++import { removeMcpConfigFile, type McpDelivery } from '../acp/mcp-config.js'
  
  export class PiRpcSpawnError extends Error {
    /** Underlying spawn error code, e.g. ENOENT, EACCES */
-@@ -103,6 +104,11 @@ type SpawnParams = {
+@@ -103,6 +104,12 @@ type SpawnParams = {
    piCommand?: string
    /** If set, pi will persist the session to this exact file (via `--session <path>`). */
    sessionPath?: string
 +  /**
-+   * Path to a per-session MCP config file (see acp/mcp-config.ts). Passed as
-+   * `--mcp-config <path>`; removed again when this process is disposed.
++   * Per-session MCP delivery (see acp/mcp-config.ts): the adapter path adds
++   * `--mcp-config <path>`; the native path adds `-e <extension>` and sets
++   * `PI_ACP_MCP_CONFIG`. The temp dir is removed when this process is disposed.
 +   */
-+  mcpConfigPath?: string
++  mcp?: McpDelivery
  }
  
  export class PiRpcProcess {
-@@ -110,9 +116,11 @@ export class PiRpcProcess {
+@@ -110,9 +117,11 @@ export class PiRpcProcess {
    private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
    private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
    private readonly preludeLines: string[] = []
@@ -327,32 +436,52 @@ index 160cc90..9f8ff30 100644
  
      const rl = readline.createInterface({ input: child.stdout })
      rl.on('line', line => {
-@@ -161,6 +169,7 @@ export class PiRpcProcess {
-     // (e.g. MCP extensions, prompt templates for workflows).
+@@ -162,12 +171,26 @@ export class PiRpcProcess {
      const args = ['--mode', 'rpc', '--no-themes']
      if (params.sessionPath) args.push('--session', params.sessionPath)
-+    if (params.mcpConfigPath) args.push('--mcp-config', params.mcpConfigPath)
  
++    // MCP delivery: the adapter reads `--mcp-config <path>`; native built-in
++    // MCP loads the generated extension with `-e`, which finds the config file
++    // through PI_ACP_MCP_CONFIG. Either way the file's lifetime is the process's.
++    let mcpConfigPath: string | null = null
++    const env: NodeJS.ProcessEnv = { ...process.env }
++    if (params.mcp?.kind === 'adapter') {
++      args.push('--mcp-config', params.mcp.configPath)
++      mcpConfigPath = params.mcp.configPath
++    } else if (params.mcp?.kind === 'native') {
++      args.push('-e', params.mcp.extensionPath)
++      env.PI_ACP_MCP_CONFIG = params.mcp.configPath
++      mcpConfigPath = params.mcp.configPath
++    }
++
      // Windows cmd launchers need shell escaping; direct executables use native argv.
      const start = shouldUseShellForPiCommand(cmd) ? crossSpawn : spawn
-@@ -192,6 +201,7 @@ export class PiRpcProcess {
+     const child = start(cmd, args, {
+       cwd: params.cwd,
+       stdio: 'pipe',
+-      env: process.env
++      env
+     }) as ChildProcessWithoutNullStreams
+ 
+     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
+@@ -192,6 +215,7 @@ export class PiRpcProcess {
        })
      } catch (e: any) {
        const code = typeof e?.code === 'string' ? e.code : undefined
-+      if (params.mcpConfigPath) removeMcpConfigFile(params.mcpConfigPath)
++      if (mcpConfigPath) removeMcpConfigFile(mcpConfigPath)
        if (code === 'ENOENT') {
          throw new PiRpcSpawnError(
            `Could not start pi: executable not found (command: ${cmd}). Pi needs to be installed before it can run in ACP clients. Install it via \`npm install -g @earendil-works/pi-coding-agent\` or ensure \`pi\` is on your PATH. Then try again.`,
-@@ -210,7 +220,7 @@ export class PiRpcProcess {
+@@ -210,7 +234,7 @@ export class PiRpcProcess {
        // leave stderr untouched; ACP clients may capture it.
      })
  
 -    const proc = new PiRpcProcess(child)
-+    const proc = new PiRpcProcess(child, params.mcpConfigPath)
++    const proc = new PiRpcProcess(child, mcpConfigPath ?? undefined)
  
      // Best-effort handshake.
      // Important: pi may emit a get_state response pointing at a sessionFile in a directory
-@@ -239,12 +249,18 @@ export class PiRpcProcess {
+@@ -239,12 +263,18 @@ export class PiRpcProcess {
    }
  
    dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
@@ -378,10 +507,10 @@ index 160cc90..9f8ff30 100644
    /**
 diff --git a/test/component/session-mcp-config.test.ts b/test/component/session-mcp-config.test.ts
 new file mode 100644
-index 0000000..b7eda77
+index 0000000..ebf62fd
 --- /dev/null
 +++ b/test/component/session-mcp-config.test.ts
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,288 @@
 +import test from 'node:test'
 +import assert from 'node:assert/strict'
 +import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -396,6 +525,8 @@ index 0000000..b7eda77
 +
 +const FAKE_PI = fileURLToPath(new URL('../helpers/fake-pi.mjs', import.meta.url))
 +
++type FakeMode = 'adapter' | 'native' | 'none'
++
 +function stdioServer(): McpServer {
 +  // No `type` field: the TS SDK strips it for the untagged stdio variant.
 +  return {
@@ -409,27 +540,48 @@ index 0000000..b7eda77
 +  } as McpServer
 +}
 +
-+/** Point PI_ACP_PI_COMMAND at the fake pi and record every invocation's argv. */
-+function useFakePi(helpHasMcpConfig: boolean): { argsFile: string; argvLines(): string[][]; restore(): void } {
++/** Point PI_ACP_PI_COMMAND at the fake pi and record every invocation's argv + env. */
++function useFakePi(mode: FakeMode): {
++  argvLines(): string[][]
++  envLines(): Array<{ argv: string[]; PI_ACP_MCP_CONFIG: string | null }>
++  restore(): void
++} {
 +  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-component-'))
 +  const argsFile = join(dir, 'args.jsonl')
++  const envFile = join(dir, 'env.jsonl')
 +  writeFileSync(argsFile, '', 'utf-8')
++  writeFileSync(envFile, '', 'utf-8')
 +
 +  const prev = { ...process.env }
 +  process.env.PI_ACP_PI_COMMAND = FAKE_PI
 +  process.env.FAKE_PI_ARGS_FILE = argsFile
-+  if (helpHasMcpConfig) delete process.env.FAKE_PI_HELP_HAS_MCP_CONFIG
-+  else process.env.FAKE_PI_HELP_HAS_MCP_CONFIG = '0'
++  process.env.FAKE_PI_ENV_FILE = envFile
++  if (mode === 'adapter') {
++    delete process.env.FAKE_PI_HELP_HAS_MCP_CONFIG
++    delete process.env.FAKE_PI_HELP_HAS_NATIVE_MCP
++  } else if (mode === 'native') {
++    process.env.FAKE_PI_HELP_HAS_MCP_CONFIG = '0'
++    process.env.FAKE_PI_HELP_HAS_NATIVE_MCP = '1'
++  } else {
++    process.env.FAKE_PI_HELP_HAS_MCP_CONFIG = '0'
++    delete process.env.FAKE_PI_HELP_HAS_NATIVE_MCP
++  }
 +  resetMcpConfigSupportCacheForTests()
 +
 +  return {
-+    argsFile,
 +    argvLines(): string[][] {
 +      if (!existsSync(argsFile)) return []
 +      return readFileSync(argsFile, 'utf-8')
 +        .split('\n')
 +        .filter(Boolean)
 +        .map(l => JSON.parse(l) as string[])
++    },
++    envLines() {
++      if (!existsSync(envFile)) return []
++      return readFileSync(envFile, 'utf-8')
++        .split('\n')
++        .filter(Boolean)
++        .map(l => JSON.parse(l))
 +    },
 +    restore() {
 +      for (const key of Object.keys(process.env)) {
@@ -442,8 +594,14 @@ index 0000000..b7eda77
 +  }
 +}
 +
-+test('newSession wires stdio MCP servers via --mcp-config and cleans up on dispose', async () => {
-+  const fake = useFakePi(true)
++function rpcArgv(fake: ReturnType<typeof useFakePi>): string[] {
++  const argv = fake.argvLines().find(a => a.includes('--mode') && a.includes('rpc'))
++  assert.ok(argv, 'fake pi was not spawned in rpc mode')
++  return argv!
++}
++
++test('newSession wires stdio MCP servers through native built-in MCP and cleans up on dispose', async () => {
++  const fake = useFakePi('native')
 +  const conn = new FakeAgentSideConnection()
 +  const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
 +  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-cwd-'))
@@ -455,37 +613,40 @@ index 0000000..b7eda77
 +    //
 +  }
 +
-+  // The pi spawn argv must carry the --mcp-config <path> token pair.
-+  const rpcArgv = fake.argvLines().find(argv => argv.includes('--mode') && argv.includes('rpc'))
-+  assert.ok(rpcArgv, 'fake pi was not spawned in rpc mode')
++  const argv = rpcArgv(fake)
++  const idx = argv.indexOf('-e')
++  assert.ok(idx >= 0, `-e missing from spawn argv: ${JSON.stringify(argv)}`)
++  const extensionPath = argv[idx + 1]
++  assert.ok(existsSync(extensionPath), 'registration extension missing at spawn time')
 +
-+  const idx = rpcArgv.indexOf('--mcp-config')
-+  assert.ok(idx >= 0, `--mcp-config missing from spawn argv: ${JSON.stringify(rpcArgv)}`)
-+  const configPath = rpcArgv[idx + 1]
-+  assert.ok(typeof configPath === 'string' && configPath.length > 0, '--mcp-config has no path argument')
-+  assert.ok(existsSync(configPath), 'config file missing at spawn time')
++  const envEntry = fake.envLines().find(e => e.argv.includes('--mode') && e.argv.includes('rpc'))
++  assert.ok(envEntry, 'no env record for the rpc spawn')
++  const configPath = envEntry!.PI_ACP_MCP_CONFIG
++  assert.ok(typeof configPath === 'string' && configPath.length > 0, 'PI_ACP_MCP_CONFIG not set on the child')
++  assert.ok(existsSync(configPath!), 'config file missing at spawn time')
 +
-+  // File contents: ACP entry mapped to a direct-tool pi-mcp-adapter entry.
-+  assert.deepEqual(readMcpConfigFile(configPath), {
++  // File contents: ACP entry mapped to a direct-exposure built-in MCP entry.
++  assert.deepEqual(readMcpConfigFile(configPath!), {
 +    mcpServers: {
 +      ptah: {
 +        command: '/usr/bin/ptah',
 +        args: ['__bridge'],
 +        env: { PTAH_BRIDGE_ADDR: '/tmp/sock', PTAH_RESULT_SCHEMA: '{}' },
-+        directTools: true
++        exposure: 'direct'
 +      }
 +    }
 +  })
 +
-+  // Session end: the temp config file (and its directory) is removed.
++  // Session end: the temp dir (config + extension) is removed.
 +  // (First drain newSession's deferred timers so no post-dispose writes happen.)
 +  await new Promise(resolve => setTimeout(resolve, 25))
 +  agent.dispose()
-+  assert.equal(existsSync(configPath), false, 'config file survived session dispose')
++  assert.equal(existsSync(configPath!), false, 'config file survived session dispose')
++  assert.equal(existsSync(extensionPath), false, 'extension file survived session dispose')
 +
 +  assert.ok(response?.sessionId, 'session/new did not return a sessionId')
 +  assert.equal(
-+    fake.argvLines().some(argv => argv.includes('--help')),
++    fake.argvLines().some(a => a.includes('--help')),
 +    true,
 +    'probe did not run'
 +  )
@@ -494,8 +655,45 @@ index 0000000..b7eda77
 +  rmSync(cwd, { recursive: true, force: true })
 +})
 +
-+test('newSession without --mcp-config support still spawns, warns, and passes no flag', async () => {
-+  const fake = useFakePi(false)
++test('newSession still delivers via --mcp-config when the pi-mcp-adapter owns MCP', async () => {
++  const fake = useFakePi('adapter')
++  const conn = new FakeAgentSideConnection()
++  const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
++  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-cwd-'))
++
++  try {
++    const response = await agent.newSession({ cwd, mcpServers: [stdioServer()] } as any)
++    assert.ok(response?.sessionId)
++
++    const argv = rpcArgv(fake)
++    const idx = argv.indexOf('--mcp-config')
++    assert.ok(idx >= 0, `--mcp-config missing from spawn argv: ${JSON.stringify(argv)}`)
++    const configPath = argv[idx + 1]
++    assert.ok(existsSync(configPath), 'config file missing at spawn time')
++    assert.equal(argv.includes('-e'), false, 'native -e passed when the adapter owns MCP')
++
++    assert.deepEqual(readMcpConfigFile(configPath), {
++      mcpServers: {
++        ptah: {
++          command: '/usr/bin/ptah',
++          args: ['__bridge'],
++          env: { PTAH_BRIDGE_ADDR: '/tmp/sock', PTAH_RESULT_SCHEMA: '{}' },
++          directTools: true
++        }
++      }
++    })
++
++    await new Promise(resolve => setTimeout(resolve, 25))
++    agent.dispose()
++    assert.equal(existsSync(configPath), false, 'config file survived session dispose')
++  } finally {
++    fake.restore()
++    rmSync(cwd, { recursive: true, force: true })
++  }
++})
++
++test('newSession without MCP support still spawns, warns, and passes no MCP flags', async () => {
++  const fake = useFakePi('none')
 +  const conn = new FakeAgentSideConnection()
 +  const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
 +  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-cwd-'))
@@ -509,9 +707,9 @@ index 0000000..b7eda77
 +    assert.match(startupInfo, /ptah/)
 +    assert.match(startupInfo, /pi install npm:pi-mcp-adapter/)
 +
-+    const rpcArgv = fake.argvLines().find(argv => argv.includes('--mode') && argv.includes('rpc'))
-+    assert.ok(rpcArgv, 'fake pi was not spawned in rpc mode')
-+    assert.equal(rpcArgv.includes('--mcp-config'), false, '--mcp-config passed to a pi without support')
++    const argv = rpcArgv(fake)
++    assert.equal(argv.includes('--mcp-config'), false, '--mcp-config passed to a pi without support')
++    assert.equal(argv.includes('-e'), false, '-e passed to a pi without support')
 +
 +    await new Promise(resolve => setTimeout(resolve, 25))
 +    agent.dispose()
@@ -521,8 +719,8 @@ index 0000000..b7eda77
 +  }
 +})
 +
-+test('newSession without MCP servers passes no --mcp-config and stays quiet', async () => {
-+  const fake = useFakePi(true)
++test('newSession without MCP servers passes no MCP flags and stays quiet', async () => {
++  const fake = useFakePi('native')
 +  const conn = new FakeAgentSideConnection()
 +  const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
 +  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-cwd-'))
@@ -531,9 +729,9 @@ index 0000000..b7eda77
 +    const response = await agent.newSession({ cwd, mcpServers: [] } as any)
 +    assert.ok(response?.sessionId)
 +
-+    const rpcArgv = fake.argvLines().find(argv => argv.includes('--mode') && argv.includes('rpc'))
-+    assert.ok(rpcArgv)
-+    assert.equal(rpcArgv.includes('--mcp-config'), false, '--mcp-config passed without servers')
++    const argv = rpcArgv(fake)
++    assert.equal(argv.includes('--mcp-config'), false, '--mcp-config passed without servers')
++    assert.equal(argv.includes('-e'), false, '-e passed without servers')
 +
 +    await new Promise(resolve => setTimeout(resolve, 25))
 +    agent.dispose()
@@ -543,9 +741,9 @@ index 0000000..b7eda77
 +  }
 +})
 +
-+test('restoreSession (session/load path) threads mcpServers into spawn', async () => {
++test('restoreSession (session/load path) threads the MCP delivery into spawn', async () => {
 +  // spawn stubbed: we only assert the params threading, not a live process.
-+  const fake = useFakePi(true)
++  const fake = useFakePi('native')
 +  const spawnCalls: any[] = []
 +  const originalSpawn = PiRpcProcess.spawn
 +  ;(PiRpcProcess as any).spawn = async (params: any) => {
@@ -569,36 +767,48 @@ index 0000000..b7eda77
 +
 +    assert.equal(spawnCalls.length, 1)
 +    assert.equal(spawnCalls[0].sessionPath, '/tmp/store-project/session.jsonl')
-+    assert.ok(typeof spawnCalls[0].mcpConfigPath === 'string', 'mcpConfigPath not threaded to spawn')
-+    assert.ok(existsSync(spawnCalls[0].mcpConfigPath), 'threaded config file does not exist')
++    assert.equal(spawnCalls[0].mcp?.kind, 'native', 'native delivery not threaded to spawn')
++    assert.ok(existsSync(spawnCalls[0].mcp.configPath), 'threaded config file does not exist')
++    assert.ok(existsSync(spawnCalls[0].mcp.extensionPath), 'threaded extension file does not exist')
 +
-+    // Unsupported pi: no config path. (Fresh session id: restoreSession
-+    // short-circuits on an already-registered session.)
++    // Adapter pi: the adapter delivery is threaded instead. (Fresh session id:
++    // restoreSession short-circuits on an already-registered session.)
 +    fake.restore()
-+    const fakeNoFlag = useFakePi(false)
++    const fakeAdapter = useFakePi('adapter')
 +    spawnCalls.length = 0
 +    await (agent as any).restoreSession('stored-session-2', { cwd: '/tmp/store-project', mcpServers: [stdioServer()] })
 +
 +    assert.equal(spawnCalls.length, 1)
-+    assert.equal(spawnCalls[0].mcpConfigPath, undefined, 'mcpConfigPath must be dropped without support')
-+    fakeNoFlag.restore()
++    assert.equal(spawnCalls[0].mcp?.kind, 'adapter', 'adapter delivery not threaded to spawn')
++    assert.ok(existsSync(spawnCalls[0].mcp.configPath), 'threaded adapter config does not exist')
++
++    // Unsupported pi: no delivery.
++    fakeAdapter.restore()
++    const fakeNone = useFakePi('none')
++    spawnCalls.length = 0
++    await (agent as any).restoreSession('stored-session-3', { cwd: '/tmp/store-project', mcpServers: [stdioServer()] })
++
++    assert.equal(spawnCalls.length, 1)
++    assert.equal(spawnCalls[0].mcp, undefined, 'delivery must be dropped without support')
++    fakeNone.restore()
 +  } finally {
 +    PiRpcProcess.spawn = originalSpawn
 +    for (const call of spawnCalls) {
-+      if (typeof call?.mcpConfigPath === 'string') removeMcpConfigFile(call.mcpConfigPath)
++      if (typeof call?.mcp?.configPath === 'string') removeMcpConfigFile(call.mcp.configPath)
 +    }
 +    fake.restore()
 +  }
 +})
 diff --git a/test/helpers/fake-pi.mjs b/test/helpers/fake-pi.mjs
 new file mode 100755
-index 0000000..b83b205
+index 0000000..7f48657
 --- /dev/null
 +++ b/test/helpers/fake-pi.mjs
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,102 @@
 +#!/usr/bin/env node
-+// Fake `pi` executable for tests: records its argv, answers `--help`, and
-+// speaks the minimal pi RPC subset pi-acp needs during session/new.
++// Fake `pi` executable for tests: records argv (and selected child env),
++// answers `--help`, and speaks the minimal pi RPC subset pi-acp needs during
++// session/new.
 +import { appendFileSync } from 'node:fs'
 +
 +const argv = process.argv.slice(2)
@@ -606,6 +816,17 @@ index 0000000..b83b205
 +if (process.env.FAKE_PI_ARGS_FILE) {
 +  try {
 +    appendFileSync(process.env.FAKE_PI_ARGS_FILE, JSON.stringify(argv) + '\n')
++  } catch {
++    // ignore recording failures
++  }
++}
++
++if (process.env.FAKE_PI_ENV_FILE) {
++  try {
++    appendFileSync(
++      process.env.FAKE_PI_ENV_FILE,
++      JSON.stringify({ argv, PI_ACP_MCP_CONFIG: process.env.PI_ACP_MCP_CONFIG ?? null }) + '\n'
++    )
 +  } catch {
 +    // ignore recording failures
 +  }
@@ -624,6 +845,10 @@ index 0000000..b83b205
 +  // extension (no --mcp-config flag).
 +  if (process.env.FAKE_PI_HELP_HAS_MCP_CONFIG !== '0') {
 +    lines.push('  --mcp-config <value>    Path to MCP config file')
++  }
++  // FAKE_PI_HELP_HAS_NATIVE_MCP=1 simulates a pi with built-in MCP (>= 0.99).
++  if (process.env.FAKE_PI_HELP_HAS_NATIVE_MCP === '1') {
++    lines.push('  pi mcp <command>        Check MCP servers')
 +  }
 +  console.log(lines.join('\n'))
 +  process.exit(0)
@@ -684,30 +909,34 @@ index 0000000..b83b205
 +process.stdin.on('end', () => process.exit(0))
 diff --git a/test/unit/mcp-config.test.ts b/test/unit/mcp-config.test.ts
 new file mode 100644
-index 0000000..20b76b6
+index 0000000..0a78af7
 --- /dev/null
 +++ b/test/unit/mcp-config.test.ts
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,346 @@
 +import test from 'node:test'
 +import assert from 'node:assert/strict'
 +import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 +import { tmpdir } from 'node:os'
-+import { join } from 'node:path'
-+import { fileURLToPath } from 'node:url'
++import { dirname, join } from 'node:path'
++import { fileURLToPath, pathToFileURL } from 'node:url'
 +import type { McpServer, McpServerStdio } from '@agentclientprotocol/sdk'
 +import {
 +  filterStdioMcpServers,
-+  toMcpConfigFile,
++  toAdapterMcpConfigFile,
++  toNativeMcpConfigFile,
 +  writeMcpConfigFile,
++  writeMcpRegisterExtension,
 +  removeMcpConfigFile,
 +  readMcpConfigFile,
 +  mcpConfigFileMode,
 +  prepareSessionMcpConfig,
-+  piSupportsMcpConfig,
++  detectMcpSupport,
 +  resetMcpConfigSupportCacheForTests
 +} from '../../src/acp/mcp-config.js'
 +
 +const FAKE_PI = fileURLToPath(new URL('../helpers/fake-pi.mjs', import.meta.url))
++
++type FakeMode = 'adapter' | 'native' | 'none'
 +
 +function stdioServer(overrides: Partial<McpServerStdio> = {}): McpServerStdio {
 +  // Note: no `type` field — the TS SDK strips it for the untagged stdio variant.
@@ -724,33 +953,56 @@ index 0000000..20b76b6
 +  return { type: 'http', name: 'remote', url: 'https://mcp.example.com', headers: [] } as McpServer
 +}
 +
-+/** Set up a fake pi invocation recorder: returns { argsFile, lines() }. */
-+function recorder(): { argsFile: string; lines(): string[][] } {
++/** Set up a fake pi invocation recorder: argv and selected child env. */
++function recorder(): {
++  dir: string
++  argsFile: string
++  envFile: string
++  lines(): string[][]
++  envLines(): Array<{ argv: string[]; PI_ACP_MCP_CONFIG: string | null }>
++} {
 +  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-test-'))
 +  const argsFile = join(dir, 'args.jsonl')
++  const envFile = join(dir, 'env.jsonl')
 +  writeFileSync(argsFile, '', 'utf-8')
++  writeFileSync(envFile, '', 'utf-8')
 +  return {
++    dir,
 +    argsFile,
++    envFile,
 +    lines(): string[][] {
 +      if (!existsSync(argsFile)) return []
 +      return readFileSync(argsFile, 'utf-8')
 +        .split('\n')
 +        .filter(Boolean)
 +        .map(l => JSON.parse(l) as string[])
++    },
++    envLines() {
++      if (!existsSync(envFile)) return []
++      return readFileSync(envFile, 'utf-8')
++        .split('\n')
++        .filter(Boolean)
++        .map(l => JSON.parse(l))
 +    }
 +  }
 +}
 +
-+function withFakePi(
-+  helpHasMcpConfig: boolean,
-+  fn: (rec: { argsFile: string; lines(): string[][] }) => Promise<void> | void
-+): Promise<void> {
++function withFakePi(mode: FakeMode, fn: (rec: ReturnType<typeof recorder>) => Promise<void> | void): Promise<void> {
 +  const rec = recorder()
 +  const prev = { ...process.env }
 +  process.env.PI_ACP_PI_COMMAND = FAKE_PI
 +  process.env.FAKE_PI_ARGS_FILE = rec.argsFile
-+  if (helpHasMcpConfig) delete process.env.FAKE_PI_HELP_HAS_MCP_CONFIG
-+  else process.env.FAKE_PI_HELP_HAS_MCP_CONFIG = '0'
++  process.env.FAKE_PI_ENV_FILE = rec.envFile
++  if (mode === 'adapter') {
++    delete process.env.FAKE_PI_HELP_HAS_MCP_CONFIG
++    delete process.env.FAKE_PI_HELP_HAS_NATIVE_MCP
++  } else if (mode === 'native') {
++    process.env.FAKE_PI_HELP_HAS_MCP_CONFIG = '0'
++    process.env.FAKE_PI_HELP_HAS_NATIVE_MCP = '1'
++  } else {
++    process.env.FAKE_PI_HELP_HAS_MCP_CONFIG = '0'
++    delete process.env.FAKE_PI_HELP_HAS_NATIVE_MCP
++  }
 +  resetMcpConfigSupportCacheForTests()
 +
 +  return Promise.resolve()
@@ -761,12 +1013,12 @@ index 0000000..20b76b6
 +      }
 +      Object.assign(process.env, prev)
 +      resetMcpConfigSupportCacheForTests()
-+      rmSync(join(rec.argsFile, '..'), { recursive: true, force: true })
++      rmSync(rec.dir, { recursive: true, force: true })
 +    })
 +}
 +
-+test('toMcpConfigFile maps ACP stdio servers to direct-tool pi-mcp-adapter entries', () => {
-+  const config = toMcpConfigFile([
++test('toAdapterMcpConfigFile maps ACP stdio servers to direct-tool pi-mcp-adapter entries', () => {
++  const config = toAdapterMcpConfigFile([
 +    stdioServer(),
 +    stdioServer({
 +      name: 'other',
@@ -787,11 +1039,35 @@ index 0000000..20b76b6
 +  })
 +})
 +
-+test('toMcpConfigFile copies args arrays defensively', () => {
++test('toNativeMcpConfigFile maps ACP stdio servers to direct-exposure built-in entries', () => {
++  const config = toNativeMcpConfigFile([
++    stdioServer(),
++    stdioServer({
++      name: 'other',
++      command: 'npx',
++      args: ['a', 'b'],
++      env: [
++        { name: 'K', value: 'V' },
++        { name: 'J', value: 'W' }
++      ]
++    })
++  ])
++
++  assert.deepEqual(config, {
++    mcpServers: {
++      ptah: { command: '/usr/bin/ptah', args: ['__bridge'], env: { PTAH_BRIDGE_ADDR: '/tmp/sock' }, exposure: 'direct' },
++      other: { command: 'npx', args: ['a', 'b'], env: { K: 'V', J: 'W' }, exposure: 'direct' }
++    }
++  })
++})
++
++test('config writers copy args arrays defensively', () => {
 +  const server = stdioServer()
-+  const config = toMcpConfigFile([server])
++  const adapter = toAdapterMcpConfigFile([server])
++  const native = toNativeMcpConfigFile([server])
 +  ;(server as any).args.push('mutated')
-+  assert.deepEqual(config.mcpServers.ptah.args, ['__bridge'])
++  assert.deepEqual(adapter.mcpServers.ptah.args, ['__bridge'])
++  assert.deepEqual(native.mcpServers.ptah.args, ['__bridge'])
 +})
 +
 +test('filterStdioMcpServers keeps stdio and names dropped http/sse servers', () => {
@@ -816,12 +1092,12 @@ index 0000000..20b76b6
 +})
 +
 +test('writeMcpConfigFile writes 0600 JSON in a fresh temp dir; removeMcpConfigFile cleans up', () => {
-+  const path = writeMcpConfigFile(toMcpConfigFile([stdioServer()]))
++  const path = writeMcpConfigFile(toAdapterMcpConfigFile([stdioServer()]))
 +
 +  try {
 +    assert.ok(path.includes(join(tmpdir(), 'pi-acp-mcp-')), `unexpected path: ${path}`)
 +    assert.equal(mcpConfigFileMode(path), 0o600)
-+    assert.deepEqual(readMcpConfigFile(path), toMcpConfigFile([stdioServer()]))
++    assert.deepEqual(readMcpConfigFile(path), toAdapterMcpConfigFile([stdioServer()]))
 +  } finally {
 +    removeMcpConfigFile(path)
 +  }
@@ -829,49 +1105,120 @@ index 0000000..20b76b6
 +  assert.equal(existsSync(path), false)
 +})
 +
-+test('piSupportsMcpConfig probes --help and caches per process', async () => {
-+  await withFakePi(true, async rec => {
-+    assert.equal(piSupportsMcpConfig(process.env.PI_ACP_PI_COMMAND), true)
-+    assert.equal(piSupportsMcpConfig(process.env.PI_ACP_PI_COMMAND), true)
++// --- generated registration extension ---------------------------------------
++
++test('generated extension registers servers with exposure:direct from PI_ACP_MCP_CONFIG', async () => {
++  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-ext-'))
++  const prev = process.env.PI_ACP_MCP_CONFIG
++  try {
++    const configPath = writeMcpConfigFile(toNativeMcpConfigFile([stdioServer()]), dir)
++    process.env.PI_ACP_MCP_CONFIG = configPath
++
++    const factory = await import(pathToFileURL(writeMcpRegisterExtension(dir)).href)
++    const calls: any[] = []
++    factory.default({ registerMcpServer: (name: string, config: unknown) => calls.push({ name, config }) })
++
++    assert.deepEqual(calls, [
++      {
++        name: 'ptah',
++        config: { command: '/usr/bin/ptah', args: ['__bridge'], env: { PTAH_BRIDGE_ADDR: '/tmp/sock' }, exposure: 'direct' }
++      }
++    ])
++  } finally {
++    if (prev === undefined) delete process.env.PI_ACP_MCP_CONFIG
++    else process.env.PI_ACP_MCP_CONFIG = prev
++    rmSync(dir, { recursive: true, force: true })
++  }
++})
++
++test('generated extension is a no-op without PI_ACP_MCP_CONFIG', async () => {
++  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-ext-'))
++  const prev = process.env.PI_ACP_MCP_CONFIG
++  delete process.env.PI_ACP_MCP_CONFIG
++  try {
++    const factory = await import(pathToFileURL(writeMcpRegisterExtension(dir)).href)
++    const calls: string[] = []
++    factory.default({ registerMcpServer: (name: string) => calls.push(name) })
++    assert.deepEqual(calls, [])
++  } finally {
++    if (prev !== undefined) process.env.PI_ACP_MCP_CONFIG = prev
++    rmSync(dir, { recursive: true, force: true })
++  }
++})
++
++test('generated extension is a no-op when pi lacks registerMcpServer', async () => {
++  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-mcp-ext-'))
++  const configPath = writeMcpConfigFile(toNativeMcpConfigFile([stdioServer()]), dir)
++  const prev = process.env.PI_ACP_MCP_CONFIG
++  process.env.PI_ACP_MCP_CONFIG = configPath
++  try {
++    const factory = await import(pathToFileURL(writeMcpRegisterExtension(dir)).href)
++    // Must not throw for an older pi.
++    factory.default({})
++  } finally {
++    if (prev === undefined) delete process.env.PI_ACP_MCP_CONFIG
++    else process.env.PI_ACP_MCP_CONFIG = prev
++    rmSync(dir, { recursive: true, force: true })
++  }
++})
++
++// --- capability probe -------------------------------------------------------
++
++test('detectMcpSupport: adapter when --mcp-config is present, cached per process', async () => {
++  await withFakePi('adapter', async rec => {
++    assert.equal(detectMcpSupport(process.env.PI_ACP_PI_COMMAND), 'adapter')
++    assert.equal(detectMcpSupport(process.env.PI_ACP_PI_COMMAND), 'adapter')
 +    // Second call is served from the cache: only one --help invocation recorded.
 +    assert.deepEqual(rec.lines().filter(argv => argv.includes('--help')).length, 1)
 +  })
++})
 +
-+  await withFakePi(false, async () => {
-+    assert.equal(piSupportsMcpConfig(process.env.PI_ACP_PI_COMMAND), false)
++test('detectMcpSupport: native when the pi mcp subcommand is present', async () => {
++  await withFakePi('native', async () => {
++    assert.equal(detectMcpSupport(process.env.PI_ACP_PI_COMMAND), 'native')
 +  })
 +})
 +
-+test('piSupportsMcpConfig is false when pi is missing', () => {
++test('detectMcpSupport: none when neither mechanism is advertised', async () => {
++  await withFakePi('none', async () => {
++    assert.equal(detectMcpSupport(process.env.PI_ACP_PI_COMMAND), 'none')
++  })
++})
++
++test('detectMcpSupport is none when pi is missing', () => {
 +  resetMcpConfigSupportCacheForTests()
 +  try {
-+    assert.equal(piSupportsMcpConfig('pi-does-not-exist-12345'), false)
++    assert.equal(detectMcpSupport('pi-does-not-exist-12345'), 'none')
 +  } finally {
 +    resetMcpConfigSupportCacheForTests()
 +  }
 +})
 +
-+test('prepareSessionMcpConfig: no servers means no probe and no file', async () => {
-+  await withFakePi(true, async rec => {
++// --- session-level preparation ----------------------------------------------
++
++test('prepareSessionMcpConfig: no servers means no probe and no delivery', async () => {
++  await withFakePi('adapter', async rec => {
 +    const prepared = prepareSessionMcpConfig([], { piCommand: process.env.PI_ACP_PI_COMMAND })
-+    assert.equal(prepared.configPath, null)
++    assert.equal(prepared.delivery, null)
 +    assert.deepEqual(prepared.warnings, [])
 +    assert.deepEqual(rec.lines(), [])
 +  })
 +})
 +
-+test('prepareSessionMcpConfig: stdio servers with support write a 0600 config; http/sse warned and dropped', async () => {
-+  await withFakePi(true, async () => {
++test('prepareSessionMcpConfig: adapter delivery writes a 0600 adapter config; http/sse warned and dropped', async () => {
++  await withFakePi('adapter', async () => {
 +    const prepared = prepareSessionMcpConfig([stdioServer(), httpServer()], {
 +      piCommand: process.env.PI_ACP_PI_COMMAND
 +    })
 +
-+    assert.ok(prepared.configPath, 'expected a config file')
++    assert.ok(prepared.delivery, 'expected a delivery')
++    assert.equal(prepared.delivery!.kind, 'adapter')
++    const configPath = prepared.delivery!.configPath
 +    try {
-+      assert.equal(mcpConfigFileMode(prepared.configPath!), 0o600)
-+      assert.deepEqual(readMcpConfigFile(prepared.configPath!), toMcpConfigFile([stdioServer()]))
++      assert.equal(mcpConfigFileMode(configPath), 0o600)
++      assert.deepEqual(readMcpConfigFile(configPath), toAdapterMcpConfigFile([stdioServer()]))
 +    } finally {
-+      if (prepared.configPath) removeMcpConfigFile(prepared.configPath)
++      removeMcpConfigFile(configPath)
 +    }
 +
 +    assert.equal(prepared.warnings.length, 1)
@@ -880,20 +1227,40 @@ index 0000000..20b76b6
 +  })
 +})
 +
-+test('prepareSessionMcpConfig: without --mcp-config support servers are warned and dropped, no file', async () => {
-+  await withFakePi(false, async () => {
++test('prepareSessionMcpConfig: native delivery writes the config and registration extension in one temp dir', async () => {
++  await withFakePi('native', async () => {
 +    const prepared = prepareSessionMcpConfig([stdioServer()], { piCommand: process.env.PI_ACP_PI_COMMAND })
 +
-+    assert.equal(prepared.configPath, null)
++    assert.ok(prepared.delivery, 'expected a delivery')
++    assert.equal(prepared.delivery!.kind, 'native')
++    const { configPath, extensionPath } = prepared.delivery as { configPath: string; extensionPath: string }
++    try {
++      assert.equal(mcpConfigFileMode(configPath), 0o600)
++      assert.deepEqual(readMcpConfigFile(configPath), toNativeMcpConfigFile([stdioServer()]))
++      assert.ok(existsSync(extensionPath), 'registration extension missing')
++      assert.equal(dirname(configPath), dirname(extensionPath), 'config and extension must share the temp dir')
++    } finally {
++      removeMcpConfigFile(configPath)
++    }
++
++    assert.deepEqual(prepared.warnings, [])
++  })
++})
++
++test('prepareSessionMcpConfig: without any MCP support servers are warned and dropped, no files', async () => {
++  await withFakePi('none', async () => {
++    const prepared = prepareSessionMcpConfig([stdioServer()], { piCommand: process.env.PI_ACP_PI_COMMAND })
++
++    assert.equal(prepared.delivery, null)
 +    assert.equal(prepared.warnings.length, 1)
 +    assert.match(prepared.warnings[0], /dropped 1 MCP server/)
 +    assert.match(prepared.warnings[0], /ptah/)
-+    assert.match(prepared.warnings[0], /--mcp-config/)
++    assert.match(prepared.warnings[0], /pi >= 0.99/)
 +    assert.match(prepared.warnings[0], /pi install npm:pi-mcp-adapter/)
 +  })
 +})
 diff --git a/test/unit/session-restore.test.ts b/test/unit/session-restore.test.ts
-index 3762067..a08a93a 100644
+index 3762067..f907f80 100644
 --- a/test/unit/session-restore.test.ts
 +++ b/test/unit/session-restore.test.ts
 @@ -80,7 +80,8 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
@@ -902,7 +1269,7 @@ index 3762067..a08a93a 100644
          sessionPath: '/tmp/store-project/session.jsonl',
 -        piCommand: process.env.PI_ACP_PI_COMMAND
 +        piCommand: process.env.PI_ACP_PI_COMMAND,
-+        mcpConfigPath: undefined
++        mcp: undefined
        }
      ])
      assert.deepEqual(promptCalls, [{ message: 'hello again', images: [] }])
@@ -912,7 +1279,7 @@ index 3762067..a08a93a 100644
          sessionPath: sessionFile,
 -        piCommand: process.env.PI_ACP_PI_COMMAND
 +        piCommand: process.env.PI_ACP_PI_COMMAND,
-+        mcpConfigPath: undefined
++        mcp: undefined
        }
      ])
      assert.deepEqual(setModelCalls, [{ provider: 'test', modelId: 'beta' }])
